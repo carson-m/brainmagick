@@ -1,4 +1,7 @@
-import pandas as pd
+import numpy as np
 
-events = pd.read_csv('../../Data/brennan2019/S01/events.csv')
-print(events)
+with np.load('S01.npz') as data:
+    brain_seg = data['brain_segments']
+    audio_emb = data['audio_embeddings']
+
+input('Press Enter to continue...')
