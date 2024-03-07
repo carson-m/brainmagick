@@ -3,10 +3,12 @@ import mne as mne
 import pandas as pd
 import torchaudio
 import torch
+from torch.nn import functional as F
 from utils import to_idx
 
 class dataHandler:
-    def __init__(self, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration):
+    def __init__(self, subject_num, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration):
+        self.subject_num = subject_num
         self.model = bundle.get_model().to(device)
         self.model_srate = bundle.sample_rate
         self.device = device
@@ -28,6 +30,9 @@ class dataHandler:
         
     def get_mne_info(self):
         return self.data.info
+    
+    def get_brain_len(self):
+        return self.brain_segments.shape[-1]
         
     def get_times(self): # get the times of the audio and brain data
         sound_mask = self.mne_events['kind']=='sound'
@@ -57,28 +62,36 @@ class dataHandler:
         # audio_order: order of the audio file
         waveform, sample_rate = torchaudio.load(audio_pth)
         waveform = waveform.to(self.device)
+        features = None
+        wav2vec_emb_sr = 0
         
         if sample_rate != self.model_srate:
             waveform = torchaudio.functional.resample(waveform, sample_rate, self.model_srate)
         
-        audio_times_tmp = self.audio_times[audio_order]
+        with torch.inference_mode():
+                features, _ = self.model.extract_features(waveform) # Extract features of the whole recording
+        wav2vec_emb_sr = features[0].shape[-2] / (waveform.shape[-1]/self.model_srate) # Get the sample rate of the embeddings
+        
+        audio_times_tmp = self.audio_times[audio_order] # get the start and end times of the segments
+        
+        feat_tmp = np.ndarray([])
+        for i in [-4,-3,-2,-1]:
+            tmp = features[i].detach().cpu().numpy()
+            if i == -4:
+                feat_tmp = tmp
+            else:
+                feat_tmp = np.vstack((feat_tmp, tmp))
+        embedding_avg = np.transpose(np.mean(feat_tmp, axis=0))
+        
         for i in range(len(audio_times_tmp)):
-            waveform_tmp = waveform[:, to_idx(audio_times_tmp[i], self.model_srate): to_idx(audio_times_tmp[i] + self.window_duration, self.model_srate)]
-            with torch.inference_mode():
-                features, _ = self.model.extract_features(waveform_tmp)
-                
-                feat_tmp = np.ndarray([])
-                for i in [-4,-3,-2,-1]:
-                    tmp = features[i].detach().cpu().numpy()
-                    if i == -4:
-                        feat_tmp = tmp
-                    else:
-                        feat_tmp = np.vstack((feat_tmp, tmp))
-                embedding_tmp = np.transpose(np.mean(feat_tmp, axis=0))
-                if self.audio_embeddings.size != 0:
-                    self.audio_embeddings = np.append(self.audio_embeddings, embedding_tmp[None, :, :], axis = 0)
-                else:
-                    self.audio_embeddings = embedding_tmp[None, :, :]
+            embedding_tmp = embedding_avg[:, to_idx(audio_times_tmp[i], wav2vec_emb_sr): to_idx(audio_times_tmp[i] + self.window_duration, wav2vec_emb_sr)]
+            # print(wav2vec_emb_sr)
+            # print(embedding_tmp.shape)
+            embedding_tmp = F.interpolate(torch.tensor(embedding_tmp[None]), size = self.get_brain_len()).detach().cpu().numpy()[0]
+            if self.audio_embeddings.size != 0:
+                self.audio_embeddings = np.append(self.audio_embeddings, embedding_tmp[None, :, :], axis = 0)
+            else:
+                self.audio_embeddings = embedding_tmp[None, :, :]
     
     def get_audio_num(self):
         return self.audio_num
@@ -87,7 +100,7 @@ class dataHandler:
         return self.brain_segments, self.audio_embeddings
     
     def save_data(self, pth):
-        np.savez(pth, brain_segments=self.brain_segments, audio_embeddings=self.audio_embeddings)
+        np.savez(pth, brain_segments=self.brain_segments, audio_embeddings=self.audio_embeddings, mne_info=self.data.info, subject_num=self.subject_num)
         
 def dataFactory():
     # Example usage
@@ -107,12 +120,15 @@ def dataFactory():
     tmax = 2.5
     time_shift = 0.15
     window_duration = 3
-    pth = 'S01.npz'
+    pth = 'S01.npy'
     
-    dh = dataHandler(bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration)
+    dh = dataHandler(1, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration)
     dh.get_times()
     dh.get_brain_segments()
     for i in range(dh.get_audio_num()):
         audio_pth_tmp = audio_pth + str(i + 1) + '.wav'
         dh.get_audio_embeddings(audio_pth_tmp, i)
     dh.save_data(pth)
+
+if __name__ == '__main__':
+    dataFactory()
