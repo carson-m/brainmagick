@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 import multiprocessing
 from torch.utils.data import Dataset, DataLoader
+import torch.optim as optim
 import os, os.path
 import numpy as np
 
@@ -45,11 +46,49 @@ class myNet(nn.Module):
         x = self.conv3(x)
         return x
 
+def train_net(device, train_loader, test_loader, train_set_size, test_set_size, n_subjects, lr, num_epochs):
+    mynet = myNet(n_subjects)
+    mynet.to(device)
+    criterion = net.ClipLoss()
+    optimizer = optim.Adam(mynet.parameters(), lr=lr)
+    train_loss_array = []
+    test_loss_array = []
+    for epoch in range(num_epochs):
+        train_loss = 0.0
+        test_loss = 0.0
+        mynet.train() # Set the model to training mode
+        for data, mne_info, subjects, ground_truth in train_loader:
+            data = data.to(device)
+            ground_truth = ground_truth.to(device)
+            optimizer.zero_grad()
+            output = mynet(data, mne_info, subjects)
+            loss = criterion(output, ground_truth)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * data.shape[0]
+        
+        mynet.eval() # Set the model to evaluation mode
+        for data, mne_info, subjects, ground_truth in test_loader:
+            data = data.to(device)
+            ground_truth = ground_truth.to(device)
+            output = mynet(data, mne_info, subjects)
+            loss = criterion(output, ground_truth)
+            test_loss += loss.item() * data.shape[0]
+        
+        train_loss = train_loss / train_set_size
+        test_loss = test_loss / test_set_size
+        train_loss_array.append(train_loss)
+        test_loss_array.append(test_loss)
+        print('Epoch:', epoch, 'Train Loss:', train_loss, 'Test Loss:', test_loss)
+    return mynet, train_loss_array, test_loss_array
+
 def __main__():
     # Params
     USE_CUDA = True
     dataPth = None
     num_workers = 1
+    lr = 3e-4
+    num_epochs = 40
     
     # Variables
     num_subject = 0 # number of subjects
@@ -58,14 +97,14 @@ def __main__():
     train_brain_segments = torch.tensor([], device = device)
     train_audio_embeddings = torch.tensor([], device = device)
     train_mne_info = np.array([])
-    train_subject_num = np.array([]) # The subject number of each epoch
+    train_subject_num = np.array([]) # The subject number of each sample
     
     test_brain_segments = torch.tensor([], device = device)
     test_audio_embeddings = torch.tensor([], device = device)
     test_mne_info = np.array([])
-    test_subject_num = np.array([]) # The subject number of each epoch
+    test_subject_num = np.array([]) # The subject number of each sample
     
-    total_epochs = 0 # number of epochs
+    total_samples = 0 # number of samples
     
     
     use_cuda = USE_CUDA and torch.cuda.is_available()
@@ -90,14 +129,14 @@ def __main__():
     train_set_proportion = 0.8
     for data_file in data_file_list:
         data = np.load(dataPth + '/' + data_file)
-        num_epoch = data['brain_segments'].shape[0]
-        train_epoch = int(num_epoch * train_set_proportion)
-        subject_num_tmp = np.repeat(data['subject_num'], num_epoch)
+        num_samples = data['brain_segments'].shape[0]
+        train_epoch = int(num_samples * train_set_proportion)
+        subject_num_tmp = np.repeat(data['subject_num'], num_samples)
         print('Loading Subject ', subject_num_tmp[0])
         train_subject_num = np.append(train_subject_num, subject_num_tmp[:train_epoch])
         train_brain_segments = torch.cat((train_brain_segments, torch.tensor(data['brain_segments'][:train_epoch],device = device)), dim = 0)
         train_audio_embeddings = torch.cat(train_audio_embeddings, torch.tensor(data['audio_embeddings'][:train_epoch], device = device), dim = 0)
-        mne_info_tmp = np.repeat(data['mne_info'], num_epoch)
+        mne_info_tmp = np.repeat(data['mne_info'], num_samples)
         train_mne_info = np.append(train_mne_info, mne_info_tmp[:train_epoch])
         
         test_subject_num = np.append(test_subject_num, subject_num_tmp[train_epoch:])
@@ -105,14 +144,26 @@ def __main__():
         test_audio_embeddings = torch.cat(test_audio_embeddings, torch.tensor(data['audio_embeddings'][train_epoch:], device = device), dim = 0)
         test_mne_info = np.append(test_mne_info, mne_info_tmp[train_epoch:])
 
-        total_epochs += num_epoch
+        total_samples += num_samples
     print('Total number of subjects:', num_subject)
-    print('Total number of epochs:', total_epochs)
-    print('Num of training epochs:', train_brain_segments.shape[0])
-    print('Num of testing epochs:', test_brain_segments.shape[0])
+    print('Total number of samples:', total_samples)
+    print('Num of training samples:', train_brain_segments.shape[0])
+    print('Num of testing samples:', test_brain_segments.shape[0])
     print('Creating Training Dataset')
     train_dataset = myDataset(train_brain_segments, train_audio_embeddings, train_mne_info, train_subject_num)
     print('Creating Testing Dataset')
     test_dataset = myDataset(test_brain_segments, test_audio_embeddings, test_mne_info, test_subject_num)
     print('Creating Training DataLoader')
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True, num_workers=num_workers)
+    mynet, train_loss_array, test_loss_array = train_net(device, train_loader, test_loader, train_brain_segments.shape[0], test_brain_segments.shape[0], num_subject, lr=lr, num_epochs=num_epochs)
+    
+    # Save the model
+    torch.save(mynet.state_dict(), 'mynet.pth')
+    print('Model saved')
+    # Save the loss arrays
+    np.save('loss.npy', train_loss_array, test_loss_array)
+    print('Loss saved')
+    
+if __name__ == '__main__':
+    __main__()

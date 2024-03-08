@@ -23,11 +23,11 @@ class PositionObtainer:
         positions = np.array([x, y]) # (C, 2)
         return positions
     
-    def get_positions(self, brain_data, batch): # Get the channel positions of the batch
+    def get_positions(self, brain_data, mne_info): # Get the channel positions of the batch
         B, C, T = brain_data.shape
         positions = torch.full((B, C, 2), self.INVALID, device=brain_data.device) # init with INVALID marker
-        for idx in range(len(batch)):
-            mne_info_tmp = batch.mne_info[idx]
+        for idx in range(len(mne_info)):
+            mne_info_tmp = mne_info[idx]
             rec_pos = self.get_channel_layout(mne_info_tmp)
             positions[idx, :len(rec_pos)] = rec_pos.to(brain_data.device)
         return positions # 归一化的channel位置 (B, C, 2)
@@ -64,12 +64,12 @@ class ChannelDropout(nn.Module):
         self.r_drop = r_drop
         self.position_obtainer = PositionObtainer()
         
-    def forward(self, brain_dat, batch):
+    def forward(self, brain_dat, mne_info):
         if not self.r_drop:
             return brain_dat
         
         B, C, T = brain_dat.shape
-        positions = self.position_obtainer.get_positions(brain_dat, batch)
+        positions = self.position_obtainer.get_positions(brain_dat, mne_info)
         
         if self.training:
             drop_center = torch.rand(2, device=brain_dat.device) # center of dropout (x, y)
@@ -106,9 +106,9 @@ class SpatialAttention(nn.Module):
     def training_penalty(self): # what is this?
         return self._penalty.to(next(self.parameters()).device)
         
-    def forward(self, brain_data, batch):
+    def forward(self, brain_data, mne_info):
         B, C, T = brain_data.shape
-        positions = self.position_obtainer.get_positions(brain_data, batch)
+        positions = self.position_obtainer.get_positions(brain_data, mne_info)
         emb = self.embedding(positions)
         score_offset = torch.zeros(B, C, device=brain_data.device)
         if self.training and self.r_drop:
