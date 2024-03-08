@@ -153,7 +153,7 @@ class SubjectLayers(nn.Module):
 
 class ConvSequence(nn.Module):
     def __init__(self, k: int, dilation_period: int, groups: int = 1):
-        super().init()
+        super().__init__()
         in_channels = 320
         if k == 0: # if first block, input channels are 270
             in_channels = 270

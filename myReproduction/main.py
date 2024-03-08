@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 import os, os.path
 import numpy as np
+import multiprocessing
 
 class myDataset(Dataset):
     def __init__(self, data, ground_truth, mne_info, subject_num):
@@ -85,10 +86,17 @@ def train_net(device, train_loader, test_loader, train_set_size, test_set_size, 
 def __main__():
     # Params
     USE_CUDA = True
-    dataPth = None
+    dataPth = './'
     num_workers = 1
     lr = 3e-4
     num_epochs = 40
+    
+    use_cuda = USE_CUDA and torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
+    print('Using device', device)
+    maximum_thread = multiprocessing.cpu_count()
+    print('Available threads:', maximum_thread)
+    print('Num workers:', num_workers)
     
     # Variables
     num_subject = 0 # number of subjects
@@ -107,41 +115,34 @@ def __main__():
     total_samples = 0 # number of samples
     
     
-    use_cuda = USE_CUDA and torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
-    print('Using device', device)
-    maximum_thread = multiprocessing.cpu_count()
-    print('Available threads:', maximum_thread)
-    print('Num workers:', num_workers)
-    
-    
     # Load the data from file
     for __,__,filenames in os.walk(dataPth): 
     # print(root)
     # print(dirname)
     # print(filenames)
         for filename in filenames:  
-            print(filename)
             if os.path.splitext(filename)[-1]=='.npz':
                 num_subject += 1
                 data_file_list.append(filename)
     
     train_set_proportion = 0.8
     for data_file in data_file_list:
-        data = np.load(dataPth + '/' + data_file)
+        data = np.load(dataPth + '/' + data_file, allow_pickle=True)
         num_samples = data['brain_segments'].shape[0]
         train_epoch = int(num_samples * train_set_proportion)
         subject_num_tmp = np.repeat(data['subject_num'], num_samples)
         print('Loading Subject ', subject_num_tmp[0])
         train_subject_num = np.append(train_subject_num, subject_num_tmp[:train_epoch])
-        train_brain_segments = torch.cat((train_brain_segments, torch.tensor(data['brain_segments'][:train_epoch],device = device)), dim = 0)
-        train_audio_embeddings = torch.cat(train_audio_embeddings, torch.tensor(data['audio_embeddings'][:train_epoch], device = device), dim = 0)
+        brain_segments = data['brain_segments']
+        audio_embeddings = data['audio_embeddings']
+        train_brain_segments = torch.cat((train_brain_segments, torch.tensor(brain_segments[:train_epoch],device = device)), dim = 0)
+        train_audio_embeddings = torch.cat((train_audio_embeddings, torch.tensor(audio_embeddings[:train_epoch], device = device)), dim = 0)
         mne_info_tmp = np.repeat(data['mne_info'], num_samples)
         train_mne_info = np.append(train_mne_info, mne_info_tmp[:train_epoch])
         
         test_subject_num = np.append(test_subject_num, subject_num_tmp[train_epoch:])
-        test_brain_segments = torch.cat((test_brain_segments, torch.tensor(data['brain_segments'][train_epoch:],device = device)), dim = 0)
-        test_audio_embeddings = torch.cat(test_audio_embeddings, torch.tensor(data['audio_embeddings'][train_epoch:], device = device), dim = 0)
+        test_brain_segments = torch.cat((test_brain_segments, torch.tensor(brain_segments[train_epoch:],device = device)), dim = 0)
+        test_audio_embeddings = torch.cat((test_audio_embeddings, torch.tensor(audio_embeddings[train_epoch:], device = device)), dim = 0)
         test_mne_info = np.append(test_mne_info, mne_info_tmp[train_epoch:])
 
         total_samples += num_samples
