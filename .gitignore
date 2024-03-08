@@ -21,3 +21,8 @@ resources
 *.egg-info
 draft_notebooks/
 submitit_*/
+myReproduction/wav2vec2XLSR53.pth
+myReproduction/S01.npz
+myReproduction/S01.npy.npz
+myReproduction/bf21a9e8fbc5a384.pkl
+myReproduction/018687e172ebb6c4.npy

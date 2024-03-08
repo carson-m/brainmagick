@@ -3,6 +3,7 @@ import math
 import mne
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class PositionObtainer:
     '''
@@ -48,7 +49,7 @@ class FourierEmb(nn.Module):
         freqs_x = freqs_y[:, None]
         p_x = 2 * math.pi * freqs_x
         p_y = 2 * math.pi * freqs_y
-        positions = positions[..., None, None, :] # (B, C, 1, 1, D)
+        positions = positions[..., None, None, :] # (B, C, 1, 1, D) # here 'C' denotes number of physical channels
         phase = (positions[..., 0]*p_x + positions[..., 1]*p_y).view(*O, -1) # (B, C, n_freqs**2)
         emb = torch.cat([phase.sin(), phase.cos()], dim = -1) # (B, C, pos_dim = n_freqs**2 * 2)
         return emb
@@ -78,9 +79,10 @@ class ChannelDropout(nn.Module):
         return brain_dat
 
 class SpatialAttention(nn.Module):
-    def __init__(self, chout, n_freqs, r_drop = 0.2, usage_penalty: float = 0.):
+    def __init__(self, chout, n_freqs, r_drop = 0.2, margin = 0.1, usage_penalty: float = 0.):
         '''
         inputs:
+            chout: number of output channels
             n_freqs: number of frequencies in Fourier Emb
             r_drop: dropout radius in normalized [0, 1] coordinates
         variables:
@@ -96,7 +98,7 @@ class SpatialAttention(nn.Module):
         self.heads = nn.Parameter(torch.randn(chout, self.pos_dim, requires_grad = True))
         self.heads.data /= self.pos_dim ** 0.5 # Why?
         self.r_drop = r_drop
-        self.embedding = FourierEmb(n_freqs)
+        self.embedding = FourierEmb(n_freqs, margin = margin)
         self.usage_penalty = usage_penalty
         self._penalty = torch.tensor(0.)
         
@@ -180,3 +182,17 @@ class ConvSequence(nn.Module):
         x = self.conv3(x)
         x = self.glu(x)
         return x
+
+class ClipLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+    def get_scores(self, estimates, candidates):
+        # (B, C, T) * (B', C, T) -> (B, B')
+        scores = torch.einsum("bct, oct->bo", estimates, candidates)
+        return scores
+    
+    def forward(self, estimate, candidate):
+        scores = self.get_scores(estimate, candidate)
+        target = torch.arange(len(scores), device=estimate.device)
+        return F.cross_entropy(scores, target)

@@ -110,7 +110,7 @@ class SimpleConv(nn.Module):
                 usage_penalty=merger_penalty, n_subjects=n_subjects, per_subject=merger_per_subject)
             in_channels["meg"] = merger_channels
 
-        if initial_linear:
+        if initial_linear: # 1x1 conv
             init = [nn.Conv1d(in_channels["meg"], initial_linear, 1)]
             for _ in range(initial_depth - 1):
                 init += [activation(), nn.Conv1d(initial_linear, initial_linear, 1)]
