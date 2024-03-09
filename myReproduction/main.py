@@ -9,6 +9,7 @@ import torch.optim as optim
 import os, os.path
 import numpy as np
 import multiprocessing
+import mne
 
 class myDataset(Dataset):
     def __init__(self, data, ground_truth, mne_info, subject_num):
@@ -21,17 +22,18 @@ class myDataset(Dataset):
         return len(self.brain_data)
     
     def __getitem__(self, idx):
-        return self.brain_data[idx], self.mne_info[idx], self.subject_num[idx], self.ground_truth[idx]
+        channel_layout = mne.channels.find_layout(self.mne_info[idx]).pos[:, :2]
+        return self.brain_data[idx], channel_layout, self.subject_num[idx], self.ground_truth[idx]
 
 class myNet(nn.Module):
     def __init__(self, n_subjects):
         super(myNet, self).__init__()
         self.spatial_attention = net.SpatialAttention(chout=270, n_freqs=32, r_drop=0.2, margin=0.1)
         self.subject_layer = net.SubjectLayers(n_channels=270, n_subjects=n_subjects)
-        self.conv1 = nn.Conv1d(in_channels=270, out_channels=270, kernel_size=1, stride=1, padding=0)
+        self.conv1 = nn.Conv1d(in_channels=270, out_channels=270, kernel_size=1, stride=1, padding=0, dtype=torch.double)
         self.convseq = list([])
         for k in range(5):
-            self.convseq.append(net.ConvSequence(k, dilation_period=5, groups=1))
+            self.convseq.append(net.ConvSequence(k, dilation_period=5, groups=1, dtype=torch.double))
         self.conv2 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=1, stride=1, padding=0)
         self.gelu = nn.GELU()
         self.conv3 = nn.Conv1d(in_channels=640, out_channels=1024, kernel_size=1, stride=1, padding=0)
@@ -49,8 +51,8 @@ class myNet(nn.Module):
 
 def train_net(device, train_loader, test_loader, train_set_size, test_set_size, n_subjects, lr, num_epochs):
     mynet = myNet(n_subjects)
-    mynet.to(device)
-    criterion = net.ClipLoss()
+    mynet.to(device).double()
+    criterion = net.ClipLoss().to(device).double()
     optimizer = optim.Adam(mynet.parameters(), lr=lr)
     train_loss_array = []
     test_loss_array = []
@@ -58,21 +60,25 @@ def train_net(device, train_loader, test_loader, train_set_size, test_set_size, 
         train_loss = 0.0
         test_loss = 0.0
         mynet.train() # Set the model to training mode
-        for data, mne_info, subjects, ground_truth in train_loader:
+        for data, channel_layout, subjects, ground_truth in train_loader:
             data = data.to(device)
             ground_truth = ground_truth.to(device)
+            channel_layout = channel_layout.to(device)
+            subjects = subjects.to(device).long()
             optimizer.zero_grad()
-            output = mynet(data, mne_info, subjects)
+            output = mynet(data, channel_layout, subjects)
             loss = criterion(output, ground_truth)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * data.shape[0]
         
         mynet.eval() # Set the model to evaluation mode
-        for data, mne_info, subjects, ground_truth in test_loader:
+        for data, channel_layout, subjects, ground_truth in test_loader:
             data = data.to(device)
             ground_truth = ground_truth.to(device)
-            output = mynet(data, mne_info, subjects)
+            channel_layout = channel_layout.to(device)
+            subjects = subjects.to(device).long()
+            output = mynet(data, channel_layout, subjects)
             loss = criterion(output, ground_truth)
             test_loss += loss.item() * data.shape[0]
         
@@ -104,7 +110,7 @@ def __main__():
     
     train_brain_segments = torch.tensor([], device = device)
     train_audio_embeddings = torch.tensor([], device = device)
-    train_mne_info = np.array([])
+    train_channel_layout = np.array([])
     train_subject_num = np.array([]) # The subject number of each sample
     
     test_brain_segments = torch.tensor([], device = device)
@@ -138,7 +144,7 @@ def __main__():
         train_brain_segments = torch.cat((train_brain_segments, torch.tensor(brain_segments[:train_epoch],device = device)), dim = 0)
         train_audio_embeddings = torch.cat((train_audio_embeddings, torch.tensor(audio_embeddings[:train_epoch], device = device)), dim = 0)
         mne_info_tmp = np.repeat(data['mne_info'], num_samples)
-        train_mne_info = np.append(train_mne_info, mne_info_tmp[:train_epoch])
+        train_channel_layout = np.append(train_channel_layout, mne_info_tmp[:train_epoch])
         
         test_subject_num = np.append(test_subject_num, subject_num_tmp[train_epoch:])
         test_brain_segments = torch.cat((test_brain_segments, torch.tensor(brain_segments[train_epoch:],device = device)), dim = 0)
@@ -151,7 +157,7 @@ def __main__():
     print('Num of training samples:', train_brain_segments.shape[0])
     print('Num of testing samples:', test_brain_segments.shape[0])
     print('Creating Training Dataset')
-    train_dataset = myDataset(train_brain_segments, train_audio_embeddings, train_mne_info, train_subject_num)
+    train_dataset = myDataset(train_brain_segments, train_audio_embeddings, train_channel_layout, train_subject_num)
     print('Creating Testing Dataset')
     test_dataset = myDataset(test_brain_segments, test_audio_embeddings, test_mne_info, test_subject_num)
     print('Creating Training DataLoader')

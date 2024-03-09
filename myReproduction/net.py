@@ -14,21 +14,19 @@ class PositionObtainer:
     def __init__(self):
         pass
     
-    def get_channel_layout(self, mne_info: mne.Info):
+    def get_channel_layout(self, channel_layout):
         # Get the channel layout
-        channel_layout = mne.channels.find_layout(mne_info)
-        x, y = channel_layout.pos[:, :2].T
+        x, y = channel_layout
         x = (x - x.min()) / (x.max() - x.min()) # Let x be in the range [0, 1]
         y = (y - y.min()) / (y.max() - y.min()) # Let y be in the range [0, 1]
         positions = np.array([x, y]) # (C, 2)
         return positions
     
-    def get_positions(self, brain_data, mne_info): # Get the channel positions of the batch
+    def get_positions(self, brain_data, channel_layout): # Get the channel positions of the batch
         B, C, T = brain_data.shape
         positions = torch.full((B, C, 2), self.INVALID, device=brain_data.device) # init with INVALID marker
-        for idx in range(len(mne_info)):
-            mne_info_tmp = mne_info[idx]
-            rec_pos = self.get_channel_layout(mne_info_tmp)
+        for idx in range(channel_layout.shape[0]):
+            rec_pos = channel_layout[idx]
             positions[idx, :len(rec_pos)] = rec_pos.to(brain_data.device)
         return positions # 归一化的channel位置 (B, C, 2)
     
@@ -106,23 +104,24 @@ class SpatialAttention(nn.Module):
     def training_penalty(self): # what is this?
         return self._penalty.to(next(self.parameters()).device)
         
-    def forward(self, brain_data, mne_info):
+    def forward(self, brain_data, channel_layout):
         B, C, T = brain_data.shape
-        positions = self.position_obtainer.get_positions(brain_data, mne_info)
-        emb = self.embedding(positions)
+        positions = self.position_obtainer.get_positions(brain_data, channel_layout)
+        emb = self.embedding(positions).to(brain_data)
         score_offset = torch.zeros(B, C, device=brain_data.device)
         if self.training and self.r_drop:
             drop_center = torch.rand(2, device=brain_data.device)
-            mask = (positions - drop_center).norm(dim=-1) <= self.r_drop
+            diff = positions - drop_center
+            mask = diff.norm(dim=-1) <= self.r_drop
             score_offset[mask] = float('-inf')
         
         heads = self.heads[None].expand(B, -1, -1) # (B, chout, pos_dim)
-        # (B, C, pos_dim) * (B, chout, pos_dim) -> (B, C, chout)
-        scores = torch.einsum("bcd, bod -> bco", emb, heads)
-        scores += score_offset[:, :, None]
-        weights = scores.softmax(dim = -1)
-        # Merge Channel (B, C, T) * (B, C, chout) -> (B, chout, T)
-        out = torch.einsum("bct, bco -> bot", brain_data, weights)
+        # (B, C, pos_dim) * (B, chout, pos_dim) -> (B, chout, C)
+        scores = torch.einsum("bcd, bod -> boc", emb, heads)
+        scores += score_offset[:, None]
+        weights = scores.softmax(dim = -1).to(brain_data)
+        # Merge Channel (B, C, T) * (B, chout, C) -> (B, chout, T)
+        out = torch.einsum("bct, boc -> bot", brain_data, weights)
         if self.training and self.usage_penalty > 0.: # what is this?
             usage = weights.mean(dim=(0, 1)).sum()
             self._penalty = self.usage_penalty * usage
@@ -144,7 +143,7 @@ class SubjectLayers(nn.Module):
             subjects: (B,)
         '''
         __, D, __ = self.weights.shape
-        weights_tmp = self.weights.gather(0, subjects.view(-1, 1, 1).expand(-1, D, D)) # (B, D, D)
+        weights_tmp = self.weights.gather(0, subjects.view(-1, 1, 1).expand(-1, D, D)).to(x) # (B, D, D)
         return torch.einsum("bct, bcd -> bdt", x, weights_tmp)
     
     def __repr__(self):
@@ -152,24 +151,25 @@ class SubjectLayers(nn.Module):
         return f"SubjectLayers({C}, {D}, {S})"
 
 class ConvSequence(nn.Module):
-    def __init__(self, k: int, dilation_period: int, groups: int = 1):
+    def __init__(self, k: int, dilation_period: int, groups: int = 1, dtype = torch.double):
         super().__init__()
         in_channels = 320
-        if k == 0: # if first block, input channels are 270
+        self.k = k
+        if self.k == 0: # if first block, input channels are 270
             in_channels = 270
         dilation1 = 2 ** ((2 * k) % dilation_period)
         padding1 = dilation1
         dilation2 = 2 ** ((2 * (k + 1)) % dilation_period)
         padding2 = dilation2
         self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=320, kernel_size=3, stride=1, padding=padding1\
-            , dilation=dilation1, groups=groups)
-        self.bn1 = nn.BatchNorm1d(320)
+            , dilation=dilation1, groups=groups, dtype=dtype)
+        self.bn1 = nn.BatchNorm1d(320, dtype=dtype)
         self.gelu1 = nn.GELU()
         self.conv2 = nn.Conv1d(in_channels=320, out_channels=320, kernel_size=3, stride=1, padding=padding2\
-            , dilation=dilation2, groups=groups)
-        self.bn2 = nn.BatchNorm1d(320)
+            , dilation=dilation2, groups=groups, dtype=dtype)
+        self.bn2 = nn.BatchNorm1d(320, dtype=dtype)
         self.gelu2 = nn.GELU()
-        self.conv3 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=3, stride=1, padding=1, groups=groups)
+        self.conv3 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=3, stride=1, padding=1, groups=groups, dtype=dtype)
         self.glu = nn.GLU(dim=1) # output (B, 320, T)
     
     def forward(self, x):
@@ -189,10 +189,12 @@ class ClipLoss(nn.Module):
         
     def get_scores(self, estimates, candidates):
         # (B, C, T) * (B', C, T) -> (B, B')
+        candidates = candidates.to(estimates)
         scores = torch.einsum("bct, oct->bo", estimates, candidates)
         return scores
     
     def forward(self, estimate, candidate):
         scores = self.get_scores(estimate, candidate)
         target = torch.arange(len(scores), device=estimate.device)
-        return F.cross_entropy(scores, target)
+        out = F.cross_entropy(scores, target)
+        return out

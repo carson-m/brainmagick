@@ -122,7 +122,7 @@ def dataFactory():
     window_duration = 3
     pth = 'S01.npy'
     
-    dh = dataHandler(1, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration)
+    dh = dataHandler(0, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration)
     dh.get_times()
     dh.get_brain_segments()
     for i in range(dh.get_audio_num()):
