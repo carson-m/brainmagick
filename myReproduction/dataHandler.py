@@ -6,35 +6,28 @@ import torch
 from torch.nn import functional as F
 from utils import to_idx
 
-class dataHandler:
-    def __init__(self, subject_num, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration):
+class brainHandler:
+    def __init__(self, subject_num, raw_pth, events_pth, tmin, tmax, time_shift, window_duration, mask):
         self.subject_num = subject_num
-        self.model = bundle.get_model().to(device)
-        self.model_srate = bundle.sample_rate
-        self.device = device
+        self.data = mne.io.read_raw_fif(raw_pth)
+        self.mne_events = pd.read_csv(events_pth)
+        self.brain_srate = self.data.info['sfreq']
         self.tmin = tmin # s
         self.tmax = tmax # s
         self.time_shift = time_shift # s
         self.window_duration = window_duration
-        self.data = mne.io.read_raw_fif(raw_pth)
-        # self.audio = None
-        self.mne_events = pd.read_csv(events_pth)
-        self.brain_srate = self.data.info['sfreq']
-        self.audio_times = list([])
-        self.audio_num = 0 # number of audio files
         self.brain_times = np.array([])
         self.brain_epochs = None
-        # self.audio_epochs = None
-        self.audio_embeddings = np.array([]) # Wav2Vec2 embeddings (# epochs, # features, # samples)
-        self.brain_segments = None # EEG/MEG segments (# epochs, # channels, # samples)
-        
+        self.brain_segments = None
+        self.mask = mask
+    
     def get_mne_info(self):
         return self.data.info
     
     def get_brain_len(self):
         return self.brain_segments.shape[-1]
-        
-    def get_times(self): # get the times of the audio and brain data
+    
+    def get_times(self): # get the times of the brain data
         sound_mask = self.mne_events['kind']=='sound'
         self.audio_num = np.sum(sound_mask)
         sound_starts = self.mne_events['start'].values[sound_mask]
@@ -45,22 +38,40 @@ class dataHandler:
         for i in range(len(sound_starts)):
             brain_times_tmp = np.arange(sound_starts[i], sound_stops[i], self.window_duration)
             brain_times_tmp = brain_times_tmp - self.tmin # align the brain times with the audio times
-            audio_times_tmp = np.arange(0, sound_durations[i], self.window_duration)
-            mask_tmp = np.logical_and((brain_times_tmp + self.tmin) >= sound_starts[i], (brain_times_tmp + self.tmax) < sound_stops[i])
+            mask_tmp = self.mask[i]
             brain_times_tmp = brain_times_tmp[mask_tmp]
-            audio_times_tmp = audio_times_tmp[mask_tmp]
             self.brain_times = np.append(self.brain_times, brain_times_tmp)
-            self.audio_times.append(audio_times_tmp)
-    
+            
     def get_brain_segments(self): # get EEG/MEG segments
         events = np.concatenate([to_idx(self.brain_times, self.brain_srate)[:, None], np.ones((len(self.brain_times), 2), dtype=np.int64)], 1)
         self.brain_epochs = mne.Epochs(self.data, events, tmin=self.tmin, tmax=self.tmax, baseline=(self.tmin, 0), event_repeated='drop', preload=False)
         self.brain_segments = self.brain_epochs.get_data()
     
-    def get_audio_embeddings(self, audio_pth, audio_order): # load the audio file and get the audio embeddings
+    def return_data(self):
+        return self.brain_segments
+        
+
+class audioHandler:
+    def __init__(self, audio_num, bundle, device, tmin, tmax, time_shift, window_duration):
+        self.model = bundle.get_model().to(device)
+        self.model_srate = bundle.sample_rate
+        self.device = device
+        self.window_duration = window_duration
+        self.tmax = tmax
+        self.tmin = tmin
+        self.time_shift = time_shift
+        self.audio_num = audio_num # number of audio files
+        self.audio_embeddings = np.array([]) # Wav2Vec2 embeddings (# epochs, # features, # samples)
+        self.mask = list([])
+    
+    def get_audio_embeddings(self, audio_pth): # load the audio file and get the audio embeddings
         # audio_pth: path to the audio file
-        # audio_order: order of the audio file
         waveform, sample_rate = torchaudio.load(audio_pth)
+        audio_duration = waveform.shape[-1] / sample_rate
+        audio_times = np.arange(0, audio_duration, self.window_duration)
+        mask_tmp = np.logical_and((audio_times + self.time_shift) >= 0, (audio_times + self.time_shift) < audio_duration)
+        audio_times = audio_times[mask_tmp] # make sure the audio times have corresponding EEG/MEG data
+        self.mask.append(mask_tmp) # save the mask for brain data alignment
         waveform = waveform.to(self.device)
         features = None
         wav2vec_emb_sr = 0
@@ -72,8 +83,6 @@ class dataHandler:
                 features, _ = self.model.extract_features(waveform) # Extract features of the whole recording
         wav2vec_emb_sr = features[0].shape[-2] / (waveform.shape[-1]/self.model_srate) # Get the sample rate of the embeddings
         
-        audio_times_tmp = self.audio_times[audio_order] # get the start and end times of the segments
-        
         feat_tmp = np.ndarray([])
         for i in [-4,-3,-2,-1]:
             tmp = features[i].detach().cpu().numpy()
@@ -83,8 +92,8 @@ class dataHandler:
                 feat_tmp = np.vstack((feat_tmp, tmp))
         embedding_avg = np.transpose(np.mean(feat_tmp, axis=0))
         
-        for i in range(len(audio_times_tmp)):
-            embedding_tmp = embedding_avg[:, to_idx(audio_times_tmp[i], wav2vec_emb_sr): to_idx(audio_times_tmp[i] + self.window_duration, wav2vec_emb_sr)]
+        for i in range(len(audio_times)):
+            embedding_tmp = embedding_avg[:, to_idx(audio_times[i], wav2vec_emb_sr): to_idx(audio_times[i] + self.window_duration, wav2vec_emb_sr)]
             # print(wav2vec_emb_sr)
             # print(embedding_tmp.shape)
             embedding_tmp = F.interpolate(torch.tensor(embedding_tmp[None]), size = self.get_brain_len()).detach().cpu().numpy()[0]
@@ -93,14 +102,11 @@ class dataHandler:
             else:
                 self.audio_embeddings = embedding_tmp[None, :, :]
     
-    def get_audio_num(self):
-        return self.audio_num
-    
     def return_data(self):
-        return self.brain_segments, self.audio_embeddings
+        return self.audio_embeddings
     
-    def save_data(self, pth):
-        np.savez(pth, brain_segments=self.brain_segments, audio_embeddings=self.audio_embeddings, mne_info=self.data.info, subject_num=self.subject_num)
+    def return_mask(self):
+        return self.mask
         
 def dataFactory():
     # Example usage
@@ -122,13 +128,13 @@ def dataFactory():
     window_duration = 3
     pth = 'S01.npy'
     
-    dh = dataHandler(0, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration)
-    dh.get_times()
-    dh.get_brain_segments()
-    for i in range(dh.get_audio_num()):
-        audio_pth_tmp = audio_pth + str(i + 1) + '.wav'
-        dh.get_audio_embeddings(audio_pth_tmp, i)
-    dh.save_data(pth)
+    # dh = audioHandler(0, bundle, device, raw_pth, events_pth, tmin, tmax, time_shift, window_duration)
+    # dh.get_times()
+    # dh.get_brain_segments()
+    # for i in range(dh.get_audio_num()):
+    #     audio_pth_tmp = audio_pth + str(i + 1) + '.wav'
+    #     dh.get_audio_embeddings(audio_pth_tmp, i)
+    # dh.save_data(pth)
 
 if __name__ == '__main__':
     dataFactory()
