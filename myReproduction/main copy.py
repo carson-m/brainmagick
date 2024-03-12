@@ -28,17 +28,17 @@ class myDataset(Dataset):
         return self.brain_data[idx], self.channel_layout[idx], self.subject_num[idx], self.ground_truth[idx], self.segment_label[idx]
 
 class myNet(nn.Module):
-    def __init__(self, n_subjects, device):
+    def __init__(self, n_subjects):
         super(myNet, self).__init__()
-        self.spatial_attention = net.SpatialAttention(chout=270, n_freqs=32, r_drop=0.2, margin=0.1).to(device)
-        self.subject_layer = net.SubjectLayers(n_channels=270, n_subjects=n_subjects).to(device)
-        self.conv1 = nn.Conv1d(in_channels=270, out_channels=270, kernel_size=1, stride=1, padding=0, dtype=torch.double, device=device)
+        self.spatial_attention = net.SpatialAttention(chout=270, n_freqs=32, r_drop=0.2, margin=0.1)
+        self.subject_layer = net.SubjectLayers(n_channels=270, n_subjects=n_subjects)
+        self.conv1 = nn.Conv1d(in_channels=270, out_channels=270, kernel_size=1, stride=1, padding=0, dtype=torch.double)
         self.convseq = list([])
         for k in range(5):
-            self.convseq.append(net.ConvSequence(k, dilation_period=5, groups=1, dtype=torch.double).to(device))
-        self.conv2 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=1, stride=1, padding=0, device=device)
+            self.convseq.append(net.ConvSequence(k, dilation_period=5, groups=1, dtype=torch.double))
+        self.conv2 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=1, stride=1, padding=0)
         self.gelu = nn.GELU()
-        self.conv3 = nn.Conv1d(in_channels=640, out_channels=1024, kernel_size=1, stride=1, padding=0, device=device)
+        self.conv3 = nn.Conv1d(in_channels=640, out_channels=1024, kernel_size=1, stride=1, padding=0)
     
     def forward(self, x, mne_info, subjects):
         x = self.spatial_attention(x, mne_info)
@@ -52,7 +52,7 @@ class myNet(nn.Module):
         return x
 
 def train_net(device, train_loader, test_loader, audio_embeddings, train_set_size, test_set_size, n_subjects, lr, num_epochs):
-    mynet = myNet(n_subjects, device)
+    mynet = myNet(n_subjects)
     mynet.to(device).double()
     criterion = net.ClipLoss().to(device).double()
     optimizer = optim.Adam(mynet.parameters(), lr=lr)
@@ -61,17 +61,11 @@ def train_net(device, train_loader, test_loader, audio_embeddings, train_set_siz
     test_loss_array = []
     top10_acc_train_array = []
     top10_acc_test_array = []
-    loop_mod6 = 0
     for epoch in range(num_epochs):
         train_loss = 0.0
         test_loss = 0.0
-        top10_acc_test = 0.0
-        top10_acc_train = 0.0
-        if loop_mod6 == 6:
-            loop_mod6 = 0
         mynet.train() # Set the model to training mode
         for data, channel_layout, subjects, ground_truth, segment_label in train_loader:
-            # print('training')
             data = data.to(device)
             ground_truth = ground_truth.to(device)
             channel_layout = channel_layout.to(device)
@@ -82,12 +76,10 @@ def train_net(device, train_loader, test_loader, audio_embeddings, train_set_siz
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * data.shape[0]
-            if loop_mod6 == 0:
-                top10_acc_train += eval.get_accuracy(output.detach(), segment_label.detach(), 10).item()/data.shape[0]
+            top10_acc_train = eval.get_accuracy(output, segment_label, 10)
         
         mynet.eval() # Set the model to evaluation mode
         for data, channel_layout, subjects, ground_truth, segment_label in test_loader:
-            # print('testing')
             data = data.to(device)
             ground_truth = ground_truth.to(device)
             channel_layout = channel_layout.to(device)
@@ -95,27 +87,22 @@ def train_net(device, train_loader, test_loader, audio_embeddings, train_set_siz
             output = mynet(data, channel_layout, subjects)
             loss = criterion(output, ground_truth)
             test_loss += loss.item() * data.shape[0]
-            if loop_mod6 == 0:
-                top10_acc_test = eval.get_accuracy(output.detach(), segment_label.detach(), 10).item()
+            top10_acc_test = eval.get_accuracy(output, segment_label, 10)
         
         train_loss = train_loss / train_set_size
         test_loss = test_loss / test_set_size
         train_loss_array.append(train_loss)
         test_loss_array.append(test_loss)
-        if loop_mod6 == 0:
-            top10_acc_train_array.append(top10_acc_train)
-            top10_acc_test_array.append(top10_acc_test)
-        print('Epoch:', epoch, 'Train Loss:', train_loss, 'Test Loss:', test_loss)
-        if loop_mod6 == 0:
-            print('Top-10 Train Acc:', top10_acc_train, 'Top-10 Test Acc:', top10_acc_test)
-        loop_mod6 += 1
+        top10_acc_train_array.append(top10_acc_train)
+        top10_acc_test_array.append(top10_acc_test)
+        print('Epoch:', epoch, 'Train Loss:', train_loss, 'Test Loss:', test_loss, 'Top-10 Train Acc:', top10_acc_train, 'Top-10 Test Acc:', top10_acc_test)
     return mynet, train_loss_array, test_loss_array, top10_acc_train_array, top10_acc_test_array
 
 def __main__():
     # Params
     USE_CUDA = True
     dataPth = '../../Data/brennanProcessed/'
-    num_workers = 0
+    num_workers = 1
     lr = 3e-4
     num_epochs = 40
     
@@ -164,13 +151,14 @@ def __main__():
     subject_num = 0
     for data_file in data_file_list:
         data = np.load(brain_pth + data_file, allow_pickle=True)
+        print(data['mne_info'])
         num_samples = data['brain_segments'].shape[0]
         train_epoch = int(num_samples * train_set_proportion)
         subject_num_tmp = np.repeat(subject_num, num_samples)
         print('Loading Subject ', subject_num_tmp[0])
         brain_segments = data['brain_segments']
-        mne_info = data['mne_info'].item()
-        layout_tmp = mne.find_layout(mne_info)
+        mne_info = data['mne_info']
+        layout_tmp = mne.channels.find_layout(mne_info)
         channel_layout = torch.tensor(layout_tmp.pos[:, :2], device = device)[None]
         channel_layout = channel_layout.repeat(num_samples, 1, 1)
         
@@ -188,11 +176,6 @@ def __main__():
 
         total_samples += num_samples
         subject_num += 1
-    train_subject_num = torch.tensor(train_subject_num, device=device)
-    test_subject_num = torch.tensor(test_subject_num, device=device)
-    train_segment_label = torch.tensor(train_segment_label, device=device)
-    test_segment_label = torch.tensor(test_segment_label, device=device)
-    audio_embeddings = torch.tensor(audio_embeddings, device=device)
     
     print('Total number of subjects:', num_subject)
     print('Total number of samples:', total_samples)

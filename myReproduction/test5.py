@@ -1,7 +1,7 @@
-# Wav2vec2 inspection
+# import os
 
-import numpy as np
-import torch
-
-data = np.load('018687e172ebb6c4.npy')
-print(data.shape)
+# # list all folders in the directory
+# dir = os.listdir('.')
+# dir = [d for d in dir if os.path.isfile(d)]
+# print(dir)
+print(int('01'))
