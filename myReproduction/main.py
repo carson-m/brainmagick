@@ -12,6 +12,7 @@ import numpy as np
 import multiprocessing
 import mne
 from utils import get_file
+import scipy.io as sio
 
 class myDataset(Dataset):
     def __init__(self, data, ground_truth, segment_label, channel_layout, subject_num):
@@ -117,7 +118,7 @@ def __main__():
     dataPth = '../../Data/brennanProcessed/'
     num_workers = 0
     lr = 3e-4
-    num_epochs = 40
+    num_epochs = 60
     
     use_cuda = USE_CUDA and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -211,7 +212,8 @@ def __main__():
     torch.save(mynet.state_dict(), 'mynet.pth')
     print('Model saved')
     # Save the loss arrays
-    np.save('result.npy', train_loss_array, test_loss_array, top10_train_acc, top10_test_acc)
+    # np.save('result.npy', train_loss_array, test_loss_array, top10_train_acc, top10_test_acc)
+    sio.savemat('result.mat', {'train_loss': train_loss_array, 'test_loss': test_loss_array, 'top10_train_acc': top10_train_acc, 'top10_test_acc': top10_test_acc})
     print('Result saved')
     
 if __name__ == '__main__':
