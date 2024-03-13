@@ -123,6 +123,7 @@ def __main__():
     lr = 3e-4
     num_epochs = 60
     cross_validation = 5
+    save_location = './results/'
     
     use_cuda = USE_CUDA and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -221,11 +222,12 @@ def __main__():
         mynet, train_loss_array, test_loss_array, top10_train_acc, top10_test_acc = train_net(device, train_loader, test_loader, audio_embeddings, train_brain_segments.shape[0], test_brain_segments.shape[0], num_subject, lr=lr, num_epochs=num_epochs)
         
         # Save the model
-        torch.save(mynet.state_dict(), 'mynet.pth')
+        save_location_tmp = save_location + 'cross_validation_' + str(i) + '/'
+        torch.save(mynet.state_dict(), save_location_tmp + 'mynet.pth')
         print('Model saved')
         # Save the loss arrays
         # np.save('result.npy', train_loss_array, test_loss_array, top10_train_acc, top10_test_acc)
-        sio.savemat('result.mat', {'train_loss': train_loss_array, 'test_loss': test_loss_array, 'top10_train_acc': top10_train_acc, 'top10_test_acc': top10_test_acc})
+        sio.savemat(save_location_tmp + 'result.mat', {'train_loss': train_loss_array, 'test_loss': test_loss_array, 'top10_train_acc': top10_train_acc, 'top10_test_acc': top10_test_acc})
         print('Result saved')
     
 if __name__ == '__main__':
