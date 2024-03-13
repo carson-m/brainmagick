@@ -187,14 +187,33 @@ class ClipLoss(nn.Module):
     def __init__(self):
         super().__init__()
         
+    # def get_scores(self, estimates, candidates):
+    #     # (B, C, T) * (B', C, T) -> (B, B')
+    #     candidates = candidates.to(estimates)
+    #     scores = torch.einsum("bct, oct->bo", estimates, candidates)
+    #     return scores
+    
     def get_scores(self, estimates, candidates):
-        # (B, C, T) * (B', C, T) -> (B, B')
-        candidates = candidates.to(estimates)
-        scores = torch.einsum("bct, oct->bo", estimates, candidates)
+        """Given estimates that is [B, C, T] and candidates
+        which is [B', C, T], return a [B, B'] matrix of scores of matching.
+        """
+        estimates, candidates = self.trim_samples(estimates, candidates)
+        # if self.linear:
+        #     estimates = self.linear_est(estimates)
+        #     candidates = self.linear_gt(candidates)
+        # if self.pool:
+        #     estimates = estimates.mean(dim=2, keepdim=True)
+        #     candidates = candidates.mean(dim=2, keepdim=True)
+        # if self.center:
+        #     estimates = estimates - estimates.mean(dim=(1, 2), keepdim=True)
+        #     candidates = candidates - candidates.mean(dim=(1, 2), keepdim=True)
+        inv_norms = 1 / (1e-8 + candidates.norm(dim=(1, 2), p=2))
+        # We normalize inside the einsum, to avoid creating a copy
+        # of candidates, which can be pretty big.
+        scores = torch.einsum("bct,oct,o->bo", estimates, candidates, inv_norms)
         return scores
     
     def forward(self, estimate, candidate):
         scores = self.get_scores(estimate, candidate)
         target = torch.arange(len(scores), device=estimate.device)
-        out = F.cross_entropy(scores, target)
-        return out
+        return F.cross_entropy(scores, target)
