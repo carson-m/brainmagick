@@ -197,7 +197,8 @@ class ClipLoss(nn.Module):
         """Given estimates that is [B, C, T] and candidates
         which is [B', C, T], return a [B, B'] matrix of scores of matching.
         """
-        estimates, candidates = self.trim_samples(estimates, candidates)
+        candidates = candidates.to(estimates)
+        # estimates, candidates = self.trim_samples(estimates, candidates)
         # if self.linear:
         #     estimates = self.linear_est(estimates)
         #     candidates = self.linear_gt(candidates)
