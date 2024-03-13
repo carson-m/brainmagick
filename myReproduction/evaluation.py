@@ -9,6 +9,7 @@ class SegmentLevel_Eval():
     def get_accuracy(self, estimates, true_labels, top_k):
         # (B, C, T) * (B', C, T) -> (B, B')
         self.all_embeddings = self.all_embeddings.to(estimates)
+        self.inv_norms = self.inv_norms.to(estimates)
         scores = torch.einsum("bct, oct, o->bo", estimates, self.all_embeddings, self.inv_norms)
         __, topk_indices = torch.topk(scores, top_k, dim = -1)
         true_labels = true_labels.to(topk_indices)
