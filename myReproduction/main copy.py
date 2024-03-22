@@ -76,7 +76,7 @@ def train_net(device, train_loader, test_loader, audio_embeddings, train_set_siz
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * data.shape[0]
-            top10_acc_train = eval.get_accuracy(output, segment_label, 10)
+            top10_acc_train = eval.get_correct(output, segment_label, 10)
         
         mynet.eval() # Set the model to evaluation mode
         for data, channel_layout, subjects, ground_truth, segment_label in test_loader:
@@ -87,7 +87,7 @@ def train_net(device, train_loader, test_loader, audio_embeddings, train_set_siz
             output = mynet(data, channel_layout, subjects)
             loss = criterion(output, ground_truth)
             test_loss += loss.item() * data.shape[0]
-            top10_acc_test = eval.get_accuracy(output, segment_label, 10)
+            top10_acc_test = eval.get_correct(output, segment_label, 10)
         
         train_loss = train_loss / train_set_size
         test_loss = test_loss / test_set_size

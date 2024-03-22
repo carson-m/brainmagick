@@ -72,9 +72,11 @@ class brainHandler:
         
 
 class audioHandler:
-    def __init__(self, bundle, device, tmin, tmax, time_shift, window_duration, brain_srate):
-        self.model = bundle.get_model().to(device)
-        self.model_srate = bundle.sample_rate
+    def __init__(self, device, tmin, tmax, time_shift, window_duration, brain_srate):
+        self.model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-large-xlsr-53").to(device)
+        self.model.eval()
+        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/wav2vec2-large-xlsr-53")
+        self.model_srate = self.feature_extractor.sampling_rate
         self.device = device
         self.window_duration = window_duration
         self.tmax = tmax
@@ -89,6 +91,7 @@ class audioHandler:
     def get_audio_embeddings(self, audio_pth): # load the audio file and get the audio embeddings
         # audio_pth: path to the audio file
         waveform, sample_rate = torchaudio.load(audio_pth)
+        waveform = waveform.mean(dim=0)
         audio_duration = waveform.shape[-1] / sample_rate
         audio_times = np.arange(0, audio_duration, self.window_duration)
         mask_tmp = np.logical_and((audio_times + self.time_shift) >= 0, (audio_times + self.time_shift) < audio_duration)
@@ -101,18 +104,23 @@ class audioHandler:
         if sample_rate != self.model_srate:
             waveform = torchaudio.functional.resample(waveform, sample_rate, self.model_srate)
         
-        with torch.inference_mode():
-                features, _ = self.model.extract_features(waveform) # Extract features of the whole recording
-        wav2vec_emb_sr = features[0].shape[-2] / (waveform.shape[-1]/self.model_srate) # Get the sample rate of the embeddings
+        # with torch.inference_mode():
+        #         features, _ = self.model.extract_features(waveform) # Extract features of the whole recording
         
-        feat_tmp = np.ndarray([])
-        for i in [-4,-3,-2,-1]:
-            tmp = features[i].detach().cpu().numpy()
-            if i == -4:
-                feat_tmp = tmp
-            else:
-                feat_tmp = np.vstack((feat_tmp, tmp))
-        embedding_avg = np.transpose(np.mean(feat_tmp, axis=0))
+        input_vals = self.feature_extractor(waveform, return_tensors="pt", sampling_rate=self.model_srate, do_normalize=True).input_values
+        with torch.no_grad():
+            model_output = self.model(input_vals.to(self.device), output_hidden_states=True)
+            hidden_states = model_output.get('hidden_states')
+        
+        # print('got audio hidden states')
+        
+        wav2vec_emb_sr = hidden_states[0].shape[-2] / (waveform.shape[-1]/self.model_srate) # Get the sample rate of the embeddings
+        
+        hidden_states = torch.stack(hidden_states)
+        hidden_states = hidden_states[-4:].mean(dim=0).squeeze()
+        embedding_avg = hidden_states.detach().cpu().numpy()
+
+        embedding_avg = np.transpose(embedding_avg)
         
         for i in range(len(audio_times)):
             embedding_tmp = embedding_avg[:, to_idx(audio_times[i], wav2vec_emb_sr): to_idx(audio_times[i] + self.window_duration, wav2vec_emb_sr)]
@@ -145,9 +153,6 @@ def dataFactory(audio_num):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device)
 
-    bundle = torchaudio.pipelines.WAV2VEC2_XLSR53
-    print("Sample Rate:", bundle.sample_rate)
-
     # brain_pth = '../cache/studies/brennan2019/'
     # audio_pth = '../data/brennan2019/download/audio/DownTheRabbitHoleFinal_SoundFile'
     brain_pth = '../../Data/brennan2019/'
@@ -175,12 +180,12 @@ def dataFactory(audio_num):
     
     # Get Audio Embeddings
     print('Getting Audio Embeddings')
-    ah = audioHandler(bundle=bundle, device=device, tmin=tmin, tmax=tmax, time_shift=time_shift, window_duration=window_duration, brain_srate=brain_srate)
+    ah = audioHandler(device=device, tmin=tmin, tmax=tmax, time_shift=time_shift, window_duration=window_duration, brain_srate=brain_srate)
     for i in range(audio_num):
         audio_pth_tmp = audio_pth + str(i + 1) + '.wav'
         ah.get_audio_embeddings(audio_pth_tmp)
     mask = ah.return_mask()
-    ah.stdNorm()
+    # ah.stdNorm()
     audio_embeddings = ah.return_data()
     print('Got Audio Embeddings')
     np.savez(save_pth + '/audio/wav2vecEmb', audio_embeddings=audio_embeddings)

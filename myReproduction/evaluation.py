@@ -6,7 +6,7 @@ class SegmentLevel_Eval():
         self.all_embeddings = all_embeddings # (B, C, T)
         self.inv_norms = 1 / (1e-8 + all_embeddings.norm(dim=(1, 2), p=2))
     
-    def get_accuracy(self, estimates, true_labels, top_k):
+    def get_correct(self, estimates, true_labels, top_k):
         # (B, C, T) * (B', C, T) -> (B, B')
         self.all_embeddings = self.all_embeddings.to(estimates)
         self.inv_norms = self.inv_norms.to(estimates)
@@ -14,8 +14,9 @@ class SegmentLevel_Eval():
         __, topk_indices = torch.topk(scores, top_k, dim = -1)
         true_labels = true_labels.to(topk_indices)
         topk_indices -= true_labels.view(-1, 1)
-        correct = torch.sum(topk_indices == 0)
-        return correct / len(true_labels)
+        correct = torch.sum(topk_indices == 0).item()
+        # print('correct:', correct, 'total:', len(true_labels))
+        return correct
     
 def test():
     all_embeddings = torch.rand(200, 20, 50)
@@ -23,8 +24,8 @@ def test():
     estimates = torch.rand(32, 20, 50)
     estimates[:5] = all_embeddings[:5]
     true_labels = torch.randint(0, 5, (32,))
-    top_10_acc = eval.get_accuracy(estimates, true_labels, 10)
-    top_1_acc = eval.get_accuracy(estimates, true_labels, 1)
+    top_10_acc = eval.get_correct(estimates, true_labels, 10)
+    top_1_acc = eval.get_correct(estimates, true_labels, 1)
     print(top_10_acc, top_1_acc)
     
 if __name__ == "__main__":
