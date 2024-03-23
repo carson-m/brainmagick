@@ -18,4 +18,4 @@ obj = test()
 obj.set_a()
 print(obj.a)
 
-print(np.ones((3, 2)))
+print(len(np.ones((5, 2))))

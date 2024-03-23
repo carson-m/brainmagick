@@ -1,5 +1,6 @@
 import numpy as np
-from utils import to_idx
+import pandas as pd
+from utils import to_idx, get_file
 import norm
 import mne
 import torch
@@ -74,6 +75,9 @@ class brainHandler:
     def get_srate(self):
         return self.srate
     
+    def get_eeg_len(self):
+        return self.brain_len
+    
     def normalize_brain_data(self, brain_segments):
         brain_seg_tmp = torch.tensor(brain_segments).to(self.device)
         sca = norm.RobustScaler(lowq=0.25, highq = 0.75, subsample=1., device=self.device)
@@ -126,7 +130,7 @@ class audioHandler:
         if orig_srate != self.model_srate:
             wave = torchaudio.functional.resample(wave, orig_srate, self.model_srate)
         
-        input_vals = self.feature_extractor(wave, sampling_rate = self.model_srate, return_tensors = "pt")
+        input_vals = self.feature_extractor(wave, sampling_rate = self.model_srate, return_tensors = "pt", do_normalize = True)
         with torch.no_grad():
             model_output = self.model(input_vals.to(self.device), output_hidden_states = True)
             hidden_states = model_output.get('hidden_states')
@@ -136,6 +140,75 @@ class audioHandler:
         hidden_states = torch.stack(hidden_states)
         hidden_states = hidden_states[-4:].mean(dim=0).squeeze()
         embedding_avg = hidden_states.detach().cpu().numpy()
-        return embedding_avg, wav2vec_emb_sr
+        return embedding_avg.T, wav2vec_emb_sr
     
-    def get_segment_embeddings(self):
+    def get_segment_embeddings(self, wave, orig_srate, times, tWindow, duration):
+        all_embeddings, embedding_sr = self.get_sound_embedding(wave, orig_srate, duration)
+        out = None
+        for tStart in times:
+            tEnd = tStart + tWindow
+            embedding_tmp = all_embeddings[:, to_idx(tStart, embedding_sr): to_idx(tEnd, embedding_sr)]
+            embedding_interp = F.interpolate(torch.tensor(embedding_tmp[None]), size = self.target_len).detach().cpu().numpy().squeeze()
+            if out is not None:
+                out = np.append(out, embedding_interp[None, :, :], axis = 0)
+            else:
+                out = embedding_tmp[None, :, :]
+        return out
+    
+    def get_all_embeddings(self, pths, times, tWindow, duration):
+        out = None
+        assert (len(pths) == len(times)) and (len(duration) == len(times)), "Length Mismatch in pths, times, duration"
+        for i in len(times):
+            time = times[i]
+            pth = pths[i]
+            wave, orig_srate = torchaudio.load(pth)
+            embeddings = self.get_segment_embeddings(wave, orig_srate, time, tWindow, duration[i])
+            if out is not None:
+                out = np.append(out, embeddings, axis = 0)
+            else:
+                out = embeddings
+        return out
+    
+    def save_embeddings(self, save_pth, pths, times, tWindow, duration):
+        embeddings = self.get_all_embeddings(pths, times, tWindow, duration)
+        np.savez(save_pth, audio_embeddings = embeddings)
+    
+def DataFactory(brain_pth, audio_pth, save_pth, subject_no, tmin, tmax, tshift, device, gen_audio = False, do_normalization = True, word_mask_ref = None):
+    """_summary_
+
+    Args:
+        brain_pth (_type_): Path to the brain data
+        audio_pth (_type_): Path to the audio data
+        save_pth (_type_): Path to save the data
+        subject_no (_type_): Subject Number
+        tmin (_type_): Time before word onset
+        tmax (_type_): Time after word onset
+        tshift (_type_): Time shift to account for latency
+        device (_type_): Device to run the model
+        gen_audio (bool, optional): Generate Audio Embeddings. Defaults to False.
+        do_normalization (bool, optional): Do Robust Scalar Normalization. Defaults to True.
+        word_mask_ref (_type_, optional): Reference for word mask. Defaults to None.
+    """
+    # Get times
+    event_pth = brain_pth + get_file(brain_pth, '.csv')
+    events = pd.read_csv(event_pth)
+    event_getter_obj = event_getter(tmin, tmax, tshift, events)
+    word_times, audio_times = event_getter_obj.get_times()
+    word_mask = event_getter_obj.get_word_mask()
+    
+    if word_mask_ref is not None:
+        assert word_mask == word_mask_ref, "Word Mask Mismatch"
+    
+    eeg_pth = brain_pth + get_file(brain_pth, '.fif')
+    data = mne.io.read_raw_fif(eeg_pth, preload = True)
+    bh = brainHandler(data, tmin, tmax, device)
+    bh.save_brain_segments(save_pth + 'brain/S'+ str(subject_no), word_times, do_normalization)
+    
+    if gen_audio:
+        sound_durations = event_getter_obj.get_sound_duration()
+        sound_pth = list([])
+        for i in range(len(sound_durations)):
+            sound_pth.append(audio_pth + str(i + 1) + '.wav')
+        ah = audioHandler(tmax - tmin, bh.get_eeg_len(), tshift, device)
+        ah.save_embeddings(save_pth + 'audio/S' + str(subject_no), sound_pth, audio_times, tmax - tmin, sound_durations)
+    
