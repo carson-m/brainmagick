@@ -12,6 +12,54 @@ from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Model
 def get_srate(raw_pth):
     data = mne.io.read_raw_fif(raw_pth)
     return data.info['sfreq']
+
+class event_getter:
+    def __init__(self, tmin, tmax, tshift, events):
+        self.tmin = tmin # Time before word onset
+        self.tmax = tmax # Time after word onset
+        self.tshift = tshift # Time shift to account for latency
+        self.events = events # All Events recorded in CSV File
+        self.word_mask = self.events['kind'] == type # All the rows that have type: 'word' are marked with True, others False
+        self.all_words = np.empty(shape=sum(self.word_mask), dtype=bool) # A list that has length of the number of words(len of word_mask)
+    
+    def get_event_mask(self, type):
+        return self.events['kind'] == type
+    
+    def get_sound_time(self):
+        mask = self.get_event_mask('sound')
+        sound_start = self.events['start'].values[mask]
+        sound_duration = self.events['duration'].values[mask]
+        sound_end = sound_start + sound_duration
+        return sound_start, sound_end
+    
+    def choose_words(self):
+        self.word_times = self.events['start'].values[self.word_mask]
+        self.sound_starts, self.sound_ends = self.get_sound_time()
+        for start, end in zip(self.sound_starts, self.sound_ends):
+            mask = np.logical_and(self.word_times >= start, self.word_times <= end)
+            edge_mask = np.logical_and(self.word_times[mask] + self.tmin >= start + self.tshift, self.word_times[mask] + self.tmax <= end + self.tshift) # Check if the word times are within the sound times
+            self.all_words[mask] = edge_mask
+    
+    def get_word_time(self):
+        return self.word_times[self.all_words]
+    
+    def get_audio_time(self, word_times):
+        # create a list for each audio file, the number of audio files is the same as the number of sound events
+        audio_times = list([])
+        
+        for start, end in zip(self.sound_starts, self.sound_ends):
+            mask = np.logical_and(self.word_times >= start, self.word_times <= end)
+            audio_times.append(word_times[mask] - start + self.tmin) # Audio times for each audio file, at the start of every segment
+        return audio_times
+    
+    def get_times(self):
+        self.choose_words()
+        word_times = self.get_word_time()
+        audio_times = self.get_audio_time(word_times)
+        return word_times, audio_times
+    
+    def get_word_mask(self): # For Debug Use, check if all the masks are identical
+        return self.all_words
     
 class brainHandler:
     def __init__(self, raw_pth, events_pth, tmin, tmax, time_shift, window_duration, mask, device):
