@@ -7,6 +7,7 @@ import torch
 import torchaudio
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Model
 from torch.nn import functional as F
+import os
 
 class event_getter:
     def __init__(self, tmin, tmax, tshift, events):
@@ -173,7 +174,7 @@ class audioHandler:
         embeddings = self.get_all_embeddings(pths, times, tWindow, duration)
         np.savez(save_pth, audio_embeddings = embeddings)
     
-def DataFactory(brain_pth, audio_pth, save_pth, subject_no, tmin, tmax, tshift, device, gen_audio = False, do_normalization = True, word_mask_ref = None):
+def DataFactory(brain_pth, audio_pth, save_pth, subject_no, tmin, tmax, tshift, device, gen_audio = False, do_normalization = True, word_mask_ref = None, save_word_times = False):
     """_summary_
 
     Args:
@@ -188,6 +189,7 @@ def DataFactory(brain_pth, audio_pth, save_pth, subject_no, tmin, tmax, tshift, 
         gen_audio (bool, optional): Generate Audio Embeddings. Defaults to False.
         do_normalization (bool, optional): Do Robust Scalar Normalization. Defaults to True.
         word_mask_ref (_type_, optional): Reference for word mask. Defaults to None.
+        save_word_times (bool, optional): Save Word Times. Defaults to False.
     """
     # Get times
     event_pth = brain_pth + get_file(brain_pth, '.csv')
@@ -211,4 +213,40 @@ def DataFactory(brain_pth, audio_pth, save_pth, subject_no, tmin, tmax, tshift, 
             sound_pth.append(audio_pth + str(i + 1) + '.wav')
         ah = audioHandler(tmax - tmin, bh.get_eeg_len(), tshift, device)
         ah.save_embeddings(save_pth + 'audio/S' + str(subject_no), sound_pth, audio_times, tmax - tmin, sound_durations)
+    
+    if save_word_times:
+        np.savez(save_pth + 'word_times', word_times = word_times)
+    
+    return word_mask
+
+def main():
+    # Parameters
+    brain_pth = '../../Data/brennan2019/'
+    audio_pth = '../../Data/Brennan/audio/DownTheRabbitHoleFinal_SoundFile'
+    tmin = -0.5
+    tmax = 2.5
+    time_shift = 0.15
+    save_pth = '../../Data/brennanProcessed/'
+    
+    # Environment
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    print(torch.__version__)
+    print(torchaudio.__version__)
+    torch.random.manual_seed(0)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(device)
+    
+    # Create Save Path
+    if not os.path.exists(save_pth):
+        os.makedirs(save_pth)
+        os.makedirs(save_pth + 'brain/')
+        os.makedirs(save_pth + 'audio/')
+    
+    # Get Folders of Brain Data
+    brain_dir = os.listdir(brain_pth)
+    brain_dir = [d for d in brain_dir if os.path.isdir(brain_pth + d)]
+    
+    word_mask_ref = None
+    for i in range(len(brain_dir)):
+        word_mask_ref = DataFactory(brain_pth + brain_dir[i] + '/', audio_pth, save_pth, i, tmin, tmax, time_shift, device, gen_audio = (i == 0), do_normalization = True, word_mask_ref = word_mask_ref, save_word_times = (i == 0))
     
