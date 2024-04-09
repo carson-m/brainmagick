@@ -42,8 +42,12 @@ class StandardNorm:
     
     def transform(self, X):
         X = X.to(self.device)
-        mean = X.mean()
-        # !!!!! to be fixed
+        mean = X.mean(dim=0, keepdim=True)
+        std = X.std(dim=0, keepdim=True)
+        std[std == 0] = 1
+        # print('mean=', mean)
+        # print('std=', std)
+        return (X - mean) / std
     
 # def test():
 #     X = torch.tensor([[1,2,3,4,5,6,7,8,9],[1,1,1,1,1,1,1,1,1]]).float()

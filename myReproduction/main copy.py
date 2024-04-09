@@ -98,6 +98,114 @@ def train_net(device, train_loader, test_loader, audio_embeddings, train_set_siz
         print('Epoch:', epoch, 'Train Loss:', train_loss, 'Test Loss:', test_loss, 'Top-10 Train Acc:', top10_acc_train, 'Top-10 Test Acc:', top10_acc_test)
     return mynet, train_loss_array, test_loss_array, top10_acc_train_array, top10_acc_test_array
 
+class datasetGenerator:
+    def __init__(self, train_set_proportion, validation_set_proportion, event_times, tmin, tmax):
+        self.train_set_proportion = train_set_proportion
+        self.validation_set_proportion = validation_set_proportion
+        assert train_set_proportion + validation_set_proportion < 1
+        self.event_times = event_times
+        self.tmin = tmin
+        self.tmax = tmax
+    
+    def get_masks(self):
+        total_size = len(self.event_times)
+        split_train = int(self.train_set_proportion * total_size)
+        train_mask = np.empty(total_size, dtype=bool)
+        train_mask[:split_train] = True
+        train_mask[split_train:] = False
+        
+        validation_set_size = int(self.validation_set_proportion * total_size)
+        validation_set_mask = np.full(total_size - split_train, False, dtype=bool)
+        True_choose = np.random.choice(len(validation_set_mask), validation_set_size, replace=False)
+        validation_set_mask[True_choose] = True
+        
+        validation_mask = ~train_mask
+        validation_mask[split_train:] = validation_set_mask
+        
+        test_mask = ~np.logical_or(train_mask, validation_mask)
+        
+        # Ensure that the validation set (test set) and the training set do not have overlapping events
+        critical_time = self.event_times[split_train]
+        critical_time = min(critical_time - self.tmax, critical_time + self.tmin)
+        conflict = train_mask & (self.event_times > critical_time)
+        train_mask[conflict] = False
+        
+        return train_mask, validation_mask, test_mask
+    
+    def load_data(self, brain_file_list, audio_pth):
+        train_mask, validation_mask, test_mask = self.get_masks()
+        
+        train_brain_segments = torch.tensor([])
+        train_audio_embeddings = torch.tensor([])
+        train_channel_layout = torch.tensor([])
+        train_subject_num = np.array([]) # The subject number of each sample
+        train_segment_label = np.array([]) # The segment number of each sample
+    
+        validation_brain_segments = torch.tensor([])
+        validation_audio_embeddings = torch.tensor([])
+        validation_channel_layout = torch.tensor([])
+        validation_subject_num = np.array([]) # The subject number of each sample
+        validation_segment_label = np.array([]) # The segment number of each sample
+        
+        test_brain_segments = torch.tensor([])
+        test_audio_embeddings = torch.tensor([])
+        test_channel_layout = torch.tensor([])
+        test_subject_num = np.array([]) # The subject number of each sample
+        test_segment_label = np.array([]) # The segment number of each sample
+        
+        # Load the audio data from file
+        audio_embeddings = np.load(audio_pth)['audio_embeddings']
+        segment_label = np.arange(audio_embeddings.shape[0]).astype(int)
+        len_audio = audio_embeddings.shape[0]
+        audio_embeddings = torch.tensor(audio_embeddings)
+        
+        # Load brain data while generating the training, validation and test set
+        for i in len(brain_file_list):
+            data_file = brain_file_list[i]
+            data = np.load(data_file, allow_pickle=True)
+            
+            num_samples = data['brain_segments'].shape[0]
+            assert num_samples == len_audio, 'The number of audio embeddings and brain segments do not match'
+            brain_segments = data['brain_segments']
+            mne_info = data['mne_info'].item()
+            layout_tmp = mne.find_layout(mne_info)
+            channel_layout = torch.tensor(layout_tmp.pos[:, :2])[None]
+            channel_layout = channel_layout.repeat(num_samples, 1, 1)
+            subject_num = i
+            
+            # Get data for the test set
+            test_brain_segments = torch.cat((test_brain_segments, torch.tensor(brain_segments[test_mask])), dim = 0)
+            test_audio_embeddings = torch.cat((test_audio_embeddings, audio_embeddings[test_mask]), dim = 0)
+            test_segment_label = np.append(test_segment_label, segment_label[test_mask])
+            test_subject_num = np.append(test_subject_num, np.repeat(subject_num, np.sum(test_mask)))
+            test_channel_layout = torch.cat((test_channel_layout, channel_layout[test_mask]), dim = 0)
+            
+            train_subject_num = np.append(train_subject_num, np.repeat(subject_num, np.sum(train_mask)))
+            train_brain_segments = torch.cat((train_brain_segments, torch.tensor(brain_segments[train_mask])), dim = 0)
+            train_audio_embeddings = torch.cat((train_audio_embeddings, audio_embeddings[train_mask]), dim = 0)
+            train_segment_label = np.append(train_segment_label, segment_label[train_mask])
+            train_channel_layout = torch.cat((train_channel_layout, channel_layout[train_mask]), dim = 0)
+            
+            validation_subject_num = np.append(validation_subject_num, np.repeat(subject_num, np.sum(validation_mask)))
+            validation_brain_segments = torch.cat((validation_brain_segments, torch.tensor(brain_segments[validation_mask])), dim = 0)
+            validation_audio_embeddings = torch.cat((validation_audio_embeddings, audio_embeddings[validation_mask]), dim = 0)
+            validation_channel_layout = torch.cat((validation_channel_layout, channel_layout[validation_mask]), dim = 0)
+            validation_segment_label = np.append(validation_segment_label, segment_label[validation_mask])
+
+        train_subject_num = torch.tensor(train_subject_num)
+        validation_subject_num = torch.tensor(validation_subject_num)
+        test_subject_num = torch.tensor(test_subject_num)
+        train_segment_label = torch.tensor(train_segment_label)
+        validation_segment_label = torch.tensor(validation_segment_label)
+        test_segment_label = torch.tensor(test_segment_label)
+        
+        dataset = {'train': myDataset(train_brain_segments, train_audio_embeddings, train_segment_label, train_channel_layout, train_subject_num),
+                   'validation': myDataset(validation_brain_segments, validation_audio_embeddings, validation_segment_label, validation_channel_layout, validation_subject_num),
+                   'test': myDataset(test_brain_segments, test_audio_embeddings, test_segment_label, test_channel_layout, test_subject_num)}
+        
+        return dataset, audio_embeddings
+        
+
 def __main__():
     # Params
     USE_CUDA = True

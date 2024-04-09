@@ -16,6 +16,7 @@ class PositionObtainer:
     
     def get_channel_layout(self, channel_layout):
         # Get the channel layout
+        channel_layout = channel_layout.clone()
         x, y = channel_layout
         x = (x - x.min()) / (x.max() - x.min()) # Let x be in the range [0, 1]
         y = (y - y.min()) / (y.max() - y.min()) # Let y be in the range [0, 1]
@@ -67,6 +68,7 @@ class ChannelDropout(nn.Module):
             return brain_dat
         
         B, C, T = brain_dat.shape
+        brain_dat = brain_dat.clone()
         positions = self.position_obtainer.get_positions(brain_dat, mne_info)
         
         if self.training:
@@ -93,7 +95,7 @@ class SpatialAttention(nn.Module):
         super().__init__()
         self.pos_dim = 2 * (n_freqs ** 2)
         self.position_obtainer = PositionObtainer()
-        self.heads = nn.Parameter(torch.randn(chout, self.pos_dim, requires_grad = True))
+        self.heads = nn.Parameter(torch.randn(chout, self.pos_dim, dtype=torch.double), requires_grad=True)
         self.heads.data /= self.pos_dim ** 0.5 # Why?
         self.r_drop = r_drop
         self.embedding = FourierEmb(n_freqs, margin = margin)
@@ -106,6 +108,7 @@ class SpatialAttention(nn.Module):
         
     def forward(self, brain_data, channel_layout):
         B, C, T = brain_data.shape
+        brain_data = brain_data.clone()
         positions = self.position_obtainer.get_positions(brain_data, channel_layout)
         emb = self.embedding(positions).to(brain_data)
         score_offset = torch.zeros(B, C, device=brain_data.device)
@@ -115,6 +118,7 @@ class SpatialAttention(nn.Module):
             mask = diff.norm(dim=-1) <= self.r_drop
             score_offset[mask] = float('-inf')
         
+        self.heads = self.heads.to(emb)
         heads = self.heads[None].expand(B, -1, -1) # (B, chout, pos_dim)
         # (B, C, pos_dim) * (B, chout, pos_dim) -> (B, chout, C)
         scores = torch.einsum("bcd, bod -> boc", emb, heads)
@@ -159,7 +163,7 @@ class ConvSequence(nn.Module):
             in_channels = 270
         dilation1 = 2 ** ((2 * k) % dilation_period)
         padding1 = dilation1
-        dilation2 = 2 ** ((2 * (k + 1)) % dilation_period)
+        dilation2 = 2 ** ((2 * k + 1) % dilation_period)
         padding2 = dilation2
         self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=320, kernel_size=3, stride=1, padding=padding1\
             , dilation=dilation1, groups=groups, dtype=dtype)
@@ -169,16 +173,18 @@ class ConvSequence(nn.Module):
             , dilation=dilation2, groups=groups, dtype=dtype)
         self.bn2 = nn.BatchNorm1d(320, dtype=dtype)
         self.gelu2 = nn.GELU()
-        self.conv3 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=3, stride=1, padding=1, groups=groups, dtype=dtype)
+        self.conv3 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=3, stride=1, padding=2, dilation=2, groups=groups, dtype=dtype)
         self.glu = nn.GLU(dim=1) # output (B, 320, T)
     
     def forward(self, x):
         if self.k != 0:
-            x = self.gelu1(self.bn1(self.conv1(x))) + x # Residual connection
+            x_old = x
+            x = self.gelu1(self.bn1(self.conv1(x))) + x_old # Residual connection
         else:
             x = self.gelu1(self.bn1(self.conv1(x)))
         
-        x = self.gelu2(self.bn2(self.conv2(x))) + x
+        x_old = x
+        x = self.gelu2(self.bn2(self.conv2(x))) + x_old
         x = self.conv3(x)
         x = self.glu(x)
         return x
@@ -216,5 +222,5 @@ class ClipLoss(nn.Module):
     
     def forward(self, estimate, candidate):
         scores = self.get_scores(estimate, candidate)
-        target = torch.arange(len(scores), device=estimate.device)
+        target = torch.arange(len(scores)).cuda()
         return F.cross_entropy(scores, target)

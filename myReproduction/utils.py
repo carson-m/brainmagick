@@ -9,3 +9,4 @@ def get_file(pth, file_type: str):
     for item in list_dir:
         if os.path.splitext(item)[-1]==file_type:
             return item
+    return None

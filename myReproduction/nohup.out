@@ -1,0 +1,48 @@
+Available threads: 80
+Num workers: 4
+Loading data
+For each subject: Training 1427, Validation 408, Test 204
+Loaded audio embeddings
+Loading Subject:  0
+Loading Subject:  1
+Loading Subject:  2
+Loading Subject:  3
+Loading Subject:  4
+Loading Subject:  5
+Loading Subject:  6
+Loading Subject:  7
+Loading Subject:  8
+Loading Subject:  9
+Loading Subject:  10
+Loading Subject:  11
+Loading Subject:  12
+Loading Subject:  13
+Loading Subject:  14
+Loading Subject:  15
+Loading Subject:  16
+Loading Subject:  17
+Loading Subject:  18
+Loading Subject:  19
+Loading Subject:  20
+Loading Subject:  21
+Loading Subject:  22
+Loading Subject:  23
+Loading Subject:  24
+Loading Subject:  25
+Loading Subject:  26
+Loading Subject:  27
+Loading Subject:  28
+Loading Subject:  29
+Loading Subject:  30
+Loading Subject:  31
+Loading Subject:  32
+Total number of loaded subjects:  33
+Epoch: 0, Train Loss: 5.5389, Validation Loss: 5.5372, Top-10 Train Acc: 0.0096, Top-10 Validation Acc: 0.0305
+Test Loss: 5.5272, Top-10 Test Acc: 0.0645
+Epoch: 1, Train Loss: 5.4450, Validation Loss: 5.4550, Top-10 Train Acc: 0.0218, Top-10 Validation Acc: 0.0747
+Test Loss: 5.4288, Top-10 Test Acc: 0.1417
+Epoch: 2, Train Loss: 5.0978, Validation Loss: 5.2189, Top-10 Train Acc: 0.0634, Top-10 Validation Acc: 0.1282
+Test Loss: 5.1740, Top-10 Test Acc: 0.2115
+Epoch: 3, Train Loss: 4.5667, Validation Loss: 5.1499, Top-10 Train Acc: 0.1448, Top-10 Validation Acc: 0.1602
+Test Loss: 5.1228, Top-10 Test Acc: 0.2438
+Epoch: 4, Train Loss: 3.6613, Validation Loss: 5.3542, Top-10 Train Acc: 0.3177, Top-10 Validation Acc: 0.1106

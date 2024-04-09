@@ -61,9 +61,40 @@ class datasetGenerator:
         
         return train_mask, validation_mask, test_mask
     
+    def get_masks_random(self):
+        max_overlap = self.tmax - self.tmin
+        total_size = len(self.event_times)
+        test_proportion = 1 - self.train_set_proportion - self.validation_set_proportion
+        test_size = int(test_proportion * total_size)
+        test_mask = np.full(total_size, False, dtype=bool)
+        test_mask[np.random.choice(total_size, test_size, replace=False)] = True
+        safe_mask = ~test_mask
+        
+        for time in self.event_times[test_mask]:
+            conflict = (self.event_times > time - max_overlap) & (self.event_times < time + max_overlap)
+            safe_mask[conflict] = False
+        
+        validation_size = int(self.validation_set_proportion * total_size)
+        print(np.sum(safe_mask))
+        validation_choose = np.full(np.sum(safe_mask), False, dtype=bool)
+        validation_choose[np.random.choice(np.sum(safe_mask), validation_size, replace=False)] = True
+        validation_mask = np.full(total_size, False, dtype=bool)
+        validation_mask[safe_mask] = validation_choose
+        
+        for time in self.event_times[validation_mask]:
+            conflict = (self.event_times > time - max_overlap) & (self.event_times < time + max_overlap)
+            safe_mask[conflict] = False
+        
+        train_mask = safe_mask
+        
+        return train_mask, validation_mask, test_mask
+    
     def load_data(self, brain_file_list, audio_pth):
         train_mask, validation_mask, test_mask = self.get_masks()
-        print(f"For each subject: Training {np.sum(train_mask)}, Validation {np.sum(validation_mask)}, Test {np.sum(test_mask)}")
+        train_size_each = np.sum(train_mask)
+        validation_size_each = np.sum(validation_mask)
+        test_size_each = np.sum(test_mask)
+        print(f"For each subject: Training {train_size_each}, Validation {validation_size_each}, Test {test_size_each}")
         
         train_brain_segments = torch.tensor([])
         train_audio_embeddings = torch.tensor([])
@@ -109,21 +140,21 @@ class datasetGenerator:
             # Get data for the test set
             test_brain_segments = torch.cat((test_brain_segments, torch.tensor(brain_segments[test_mask])), dim = 0)
             test_audio_embeddings = torch.cat((test_audio_embeddings, audio_embeddings[test_mask]), dim = 0)
-            test_segment_label = np.append(test_segment_label, segment_label[test_mask])
+            test_segment_label = np.append(test_segment_label, segment_label[:test_size_each])
             test_subject_num = np.append(test_subject_num, np.repeat(subject_num, np.sum(test_mask)))
             test_channel_layout = torch.cat((test_channel_layout, channel_layout[test_mask]), dim = 0)
             
             train_subject_num = np.append(train_subject_num, np.repeat(subject_num, np.sum(train_mask)))
             train_brain_segments = torch.cat((train_brain_segments, torch.tensor(brain_segments[train_mask])), dim = 0)
             train_audio_embeddings = torch.cat((train_audio_embeddings, audio_embeddings[train_mask]), dim = 0)
-            train_segment_label = np.append(train_segment_label, segment_label[train_mask])
+            train_segment_label = np.append(train_segment_label, segment_label[:train_size_each])
             train_channel_layout = torch.cat((train_channel_layout, channel_layout[train_mask]), dim = 0)
             
             validation_subject_num = np.append(validation_subject_num, np.repeat(subject_num, np.sum(validation_mask)))
             validation_brain_segments = torch.cat((validation_brain_segments, torch.tensor(brain_segments[validation_mask])), dim = 0)
             validation_audio_embeddings = torch.cat((validation_audio_embeddings, audio_embeddings[validation_mask]), dim = 0)
             validation_channel_layout = torch.cat((validation_channel_layout, channel_layout[validation_mask]), dim = 0)
-            validation_segment_label = np.append(validation_segment_label, segment_label[validation_mask])
+            validation_segment_label = np.append(validation_segment_label, segment_label[:validation_size_each])
 
         train_subject_num = torch.tensor(train_subject_num)
         validation_subject_num = torch.tensor(validation_subject_num)
@@ -131,25 +162,26 @@ class datasetGenerator:
         train_segment_label = torch.tensor(train_segment_label)
         validation_segment_label = torch.tensor(validation_segment_label)
         test_segment_label = torch.tensor(test_segment_label)
+        audio_embeddings_out = {'train': audio_embeddings[train_mask], 'validation': audio_embeddings[validation_mask], 'test': audio_embeddings[test_mask]}
         
         dataset = {'train': myDataset(train_brain_segments, train_audio_embeddings, train_segment_label, train_channel_layout, train_subject_num),
                    'validation': myDataset(validation_brain_segments, validation_audio_embeddings, validation_segment_label, validation_channel_layout, validation_subject_num),
                    'test': myDataset(test_brain_segments, test_audio_embeddings, test_segment_label, test_channel_layout, test_subject_num)}
         
-        return dataset, audio_embeddings
+        return dataset, audio_embeddings_out
 
 class myNet(nn.Module):
-    def __init__(self, n_subjects, device):
+    def __init__(self, n_subjects):
         super(myNet, self).__init__()
-        self.spatial_attention = net.SpatialAttention(chout=270, n_freqs=32, r_drop=0.2, margin=0.1).to(device)
-        self.conv1 = nn.Conv1d(in_channels=270, out_channels=270, kernel_size=1, stride=1, padding=0, dtype=torch.double, device=device)
-        self.subject_layer = net.SubjectLayers(n_channels=270, n_subjects=n_subjects).to(device)
-        self.convseq = list([])
+        self.spatial_attention = net.SpatialAttention(chout=270, n_freqs=32, r_drop=0.2, margin=0.1).cuda()
+        self.conv1 = nn.Conv1d(in_channels=270, out_channels=270, kernel_size=1, stride=1, padding=0, dtype=torch.double).cuda()
+        self.subject_layer = net.SubjectLayers(n_channels=270, n_subjects=n_subjects).cuda()
+        self.convseq = nn.ModuleList([])
         for k in range(5):
-            self.convseq.append(net.ConvSequence(k, dilation_period=5, groups=1, dtype=torch.double).to(device))
-        self.conv2 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=1, stride=1, padding=0, dtype=torch.double, device=device)
+            self.convseq.append(net.ConvSequence(k, dilation_period=5, groups=1, dtype=torch.double).cuda())
+        self.conv2 = nn.Conv1d(in_channels=320, out_channels=640, kernel_size=1, stride=1, padding=0, dtype=torch.double).cuda()
         self.gelu = nn.GELU()
-        self.conv3 = nn.Conv1d(in_channels=640, out_channels=1024, kernel_size=1, stride=1, padding=0, device=device)
+        self.conv3 = nn.Conv1d(in_channels=640, out_channels=1024, kernel_size=1, stride=1, padding=0, dtype=torch.double).cuda()
     
     def forward(self, x, mne_info, subjects):
         x = self.spatial_attention(x, mne_info)
@@ -162,54 +194,54 @@ class myNet(nn.Module):
         x = self.conv3(x)
         return x
 
-def test_net(device, test_loader, audio_embeddings, n_subjects, model_to_load):
-    mynet = myNet(n_subjects, device)
-    mynet.to(device).double()
-    mynet.load_state_dict(torch.load(model_to_load))
-    mynet.eval()
+def test_net(test_loader, audio_embeddings, model_to_load):
+    mynet = model_to_load
     total = 0
     mynet.eval() # Set the model to evaluation mode
-    criterion = net.ClipLoss().to(device).double()
+    criterion = net.ClipLoss().double().cuda()
     eval = SegmentLevel_Eval(audio_embeddings)
     test_loss = 0
+    top10_acc_test = 0
     for data, channel_layout, subjects, ground_truth, segment_label in test_loader:
         # print('testing')
         
         total += data.shape[0]
-        data = data.to(device)
-        ground_truth = ground_truth.to(device)
-        channel_layout = channel_layout.to(device)
-        subjects = subjects.to(device).long()
-        segment_label = segment_label.to(device)
+        data = data.cuda(non_blocking=True)
+        ground_truth = ground_truth.cuda(non_blocking=True)
+        channel_layout = channel_layout.cuda(non_blocking=True)
+        subjects = subjects.long().cuda(non_blocking=True)
+        segment_label = segment_label.cuda(non_blocking=True)
         
         output = mynet(data, channel_layout, subjects)
         loss = criterion(output, ground_truth)
         test_loss += loss.item() * data.shape[0]
         top10_acc_test += eval.get_correct(output.detach(), segment_label.detach(), 10)
     top10_acc_test = top10_acc_test / total
+    test_loss = test_loss / total
     print(f'Test Loss: {test_loss:.4f}, Top-10 Test Acc: {top10_acc_test:.4f}')
     return test_loss, top10_acc_test
 
-def train_net(device, train_loader, test_loader, audio_embeddings, n_subjects, lr, num_epochs, load_model=False, model_to_load=None):
-    
+def train_net(gpus, train_loader, validation_loader, test_loader, audio_embeddings, n_subjects, lr, num_epochs, patience, load_model=False, model_to_load=None):
+    mynet = myNet(n_subjects)
     best_model = None # Temp for the best performing model on the validation set
-    best_model_accuracy = 0 # Temp for the best accuracy on the validation set
+    best_model_loss = 10 # Temp for the best loss on the validation set
 
-    mynet = myNet(n_subjects, device)
-    mynet.to(device).double()
     if load_model and model_to_load is not None:
         mynet.load_state_dict(torch.load(model_to_load))
-    criterion = net.ClipLoss().to(device).double()
-    optimizer = optim.Adam(mynet.parameters(), lr=lr)
-    eval = SegmentLevel_Eval(audio_embeddings)
+    mynet = nn.DataParallel(mynet, device_ids=gpus).cuda()
+    criterion = net.ClipLoss().double().cuda()
+    optimizer = optim.Adam(mynet.parameters(), lr=lr, weight_decay=1.3e-5)
+    eval_train = SegmentLevel_Eval(audio_embeddings['train'])
+    eval_validation = SegmentLevel_Eval(audio_embeddings['validation'])
+    eval_test = SegmentLevel_Eval(audio_embeddings['test'])
     train_loss_array = []
-    test_loss_array = []
+    validation_loss_array = []
     top10_acc_train_array = []
-    top10_acc_test_array = []
+    top10_acc_validation_array = []
     for epoch in range(num_epochs):
         train_loss = 0.0
-        test_loss = 0.0
-        top10_acc_test = 0.0
+        validation_loss = 0.0
+        top10_acc_validation = 0.0
         top10_acc_train = 0.0
         total = 0
         mynet.train() # Set the model to training mode
@@ -217,11 +249,12 @@ def train_net(device, train_loader, test_loader, audio_embeddings, n_subjects, l
             # print(data.shape)
             # print('training')
             total += data.shape[0]
-            data = data.to(device)
-            ground_truth = ground_truth.to(device)
-            channel_layout = channel_layout.to(device)
-            subjects = subjects.to(device).long()
-            segment_label = segment_label.to(device)
+            
+            data = data.cuda(non_blocking=True)
+            ground_truth = ground_truth.cuda(non_blocking=True)
+            channel_layout = channel_layout.cuda(non_blocking=True)
+            subjects = subjects.long().cuda(non_blocking=True)
+            segment_label = segment_label.cuda(non_blocking=True)
             
             optimizer.zero_grad()
             output = mynet(data, channel_layout, subjects)
@@ -229,52 +262,77 @@ def train_net(device, train_loader, test_loader, audio_embeddings, n_subjects, l
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * data.shape[0]
-            top10_acc_train += eval.get_correct(output.detach(), segment_label.detach(), 10)
+            top10_acc_train += eval_train.get_correct(output.detach(), segment_label.detach(), 10)
         top10_acc_train = top10_acc_train / total
         train_loss = train_loss / total
         
         total = 0
         mynet.eval() # Set the model to evaluation mode
-        for data, channel_layout, subjects, ground_truth, segment_label in test_loader:
+        for data, channel_layout, subjects, ground_truth, segment_label in validation_loader:
             # print('testing')
             total += data.shape[0]
-            data = data.to(device)
-            ground_truth = ground_truth.to(device)
-            channel_layout = channel_layout.to(device)
-            subjects = subjects.to(device).long()
-            segment_label = segment_label.to(device)
+            
+            data = data.cuda(non_blocking=True)
+            ground_truth = ground_truth.cuda(non_blocking=True)
+            channel_layout = channel_layout.cuda(non_blocking=True)
+            subjects = subjects.long().cuda(non_blocking=True)
+            segment_label = segment_label.cuda(non_blocking=True)
+            
             output = mynet(data, channel_layout, subjects)
             loss = criterion(output, ground_truth)
-            test_loss += loss.item() * data.shape[0]
-            top10_acc_test += eval.get_correct(output.detach(), segment_label.detach(), 10)
-        top10_acc_test = top10_acc_test / total
-        test_loss = test_loss / total
+            validation_loss += loss.item() * data.shape[0]
+            top10_acc_validation += eval_validation.get_correct(output.detach(), segment_label.detach(), 10)
+        top10_acc_validation = top10_acc_validation / total
+        validation_loss = validation_loss / total
         
         train_loss_array.append(train_loss)
-        test_loss_array.append(test_loss)
+        validation_loss_array.append(validation_loss)
         
         top10_acc_train_array.append(top10_acc_train)
-        top10_acc_test_array.append(top10_acc_test)
+        top10_acc_validation_array.append(top10_acc_validation)
         
-        print(f'Epoch: {epoch}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}, Top-10 Train Acc: {top10_acc_train:.4f}, Top-10 Test Acc: {top10_acc_test:.4f}')
+        print(f'Epoch: {epoch}, Train Loss: {train_loss:.4f}, Validation Loss: {validation_loss:.4f}, Top-10 Train Acc: {top10_acc_train:.4f}, Top-10 Validation Acc: {top10_acc_validation:.4f}')
         
-        if top10_acc_test > best_model_accuracy:
-            best_model_accuracy = top10_acc_test
-            best_model = mynet.state_dict()
+        if validation_loss < best_model_loss:
+            best_model_loss = validation_loss
+            best_model = mynet
+            total = 0
+            test_loss = 0
+            top10_acc_test = 0
+            mynet.eval() # Set the model to evaluation mode
+            for data, channel_layout, subjects, ground_truth, segment_label in test_loader:
+            # print('testing')
+        
+                total += data.shape[0]
+                data = data.cuda(non_blocking = True)
+                ground_truth = ground_truth.cuda(non_blocking = True)
+                channel_layout = channel_layout.cuda(non_blocking = True)
+                subjects = subjects.long().cuda(non_blocking = True)
+                segment_label = segment_label.cuda(non_blocking = True)
+        
+                output = mynet(data, channel_layout, subjects)
+                loss = criterion(output, ground_truth)
+                test_loss += loss.item() * data.shape[0]
+                top10_acc_test += eval_test.get_correct(output.detach(), segment_label.detach(), 10)
+            top10_acc_test = top10_acc_test / total
+            test_loss = test_loss / total
+            print(f'Test Loss: {test_loss:.4f}, Top-10 Test Acc: {top10_acc_test:.4f}')
             
-    return best_model, train_loss_array, test_loss_array, top10_acc_train_array, top10_acc_test_array
+    return best_model, train_loss_array, validation_loss_array, top10_acc_train_array, top10_acc_validation_array
 
 def __main__():
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3,4"
     mp.set_start_method('spawn')
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    gpus = [0,1]
     
     # Params
-    trail = 6
-    USE_CUDA = True
+    trail = 16
     dataPth = '../../Data/brennanProcessed/'
-    num_workers = 2
-    lr = 3e-4
-    num_epochs = 40
+    num_workers = 4
+    lr = 2.5e-4
+    num_epochs = 12
+    patience = 15
+    batch_size = 256
     training_set_proportion = 0.7
     validation_set_proportion = 0.2
     tmin = -0.5
@@ -285,9 +343,8 @@ def __main__():
     if not os.path.exists(save_location):
         os.makedirs(save_location)
     
-    use_cuda = USE_CUDA and torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
-    print('Using device', device)
+    assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
+
     maximum_thread = mp.cpu_count()
     print('Available threads:', maximum_thread)
     print('Num workers:', num_workers)
@@ -300,24 +357,24 @@ def __main__():
     assert time_file is not None, 'No time file found'
     word_times = np.load(time_pth + time_file)['word_times']
     brain_file_list = [brain_pth + f for f in os.listdir(brain_pth) if os.path.isfile(brain_pth + f)]
-    brain_file_list = brain_file_list[:2]# !!!!! For Testing Code Only
+    # brain_file_list = brain_file_list[:2]# !!!!! For Testing Code Only
     print("Loading data")
     dataGen = datasetGenerator(training_set_proportion, validation_set_proportion, word_times, tmin, tmax)
     datasets, audio_embeddings = dataGen.load_data(brain_file_list, audio_pth)
     num_subjects = len(brain_file_list)
     print("Total number of loaded subjects: ", num_subjects)
     
-    train_loader = DataLoader(datasets['train'], batch_size=32, shuffle=True, num_workers=num_workers)
-    validation_loader = DataLoader(datasets['validation'], batch_size=32, shuffle=True, num_workers=num_workers)
-    mynet, train_loss_array, validation_loss_array, top10_train_acc, top10_validation_acc = train_net(device, train_loader, validation_loader, audio_embeddings, num_subjects, lr=lr, num_epochs=num_epochs)
+    train_loader = DataLoader(datasets['train'], batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    validation_loader = DataLoader(datasets['validation'], batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    test_loader = DataLoader(datasets['test'], batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    mynet, train_loss_array, validation_loss_array, top10_train_acc, top10_validation_acc = train_net(gpus, train_loader, validation_loader, test_loader, audio_embeddings, num_subjects, lr=lr, num_epochs=num_epochs, patience=patience)
 
     # Test the model
     print('Testing the model')
-    test_loader = DataLoader(datasets['test'], batch_size=32, shuffle=True, num_workers=num_workers)
-    test_loss, top10_test_acc = test_net(device, test_loader, audio_embeddings, num_subjects, mynet)
+    test_loss, top10_test_acc = test_net(test_loader, audio_embeddings['test'], mynet)
 
     # Save the model
-    torch.save(mynet.state_dict(), save_location + 'mynet.pth')
+    torch.save(mynet, save_location + 'mynet.pth')
     print('Model saved')
     # Save the loss arrays
     # np.save('result.npy', train_loss_array, test_loss_array, top10_train_acc, top10_test_acc)

@@ -15,7 +15,7 @@ class event_getter:
         self.tmax = tmax # Time after word onset
         self.tshift = tshift # Time shift to account for latency
         self.events = events # All Events recorded in CSV File
-        self.word_mask = self.events['kind'] == type # All the rows that have type: 'word' are marked with True, others False
+        self.word_mask = self.events['kind'] == 'word' # All the rows that have type: 'word' are marked with True, others False
         self.all_words = np.empty(shape=sum(self.word_mask), dtype=bool) # A list that has length of the number of words(len of word_mask)
     
     def get_event_mask(self, type):
@@ -48,7 +48,7 @@ class event_getter:
         audio_times = list([])
         
         for start, end in zip(self.sound_starts, self.sound_ends):
-            mask = np.logical_and(self.word_times >= start, self.word_times <= end)
+            mask = np.logical_and(word_times >= start, word_times <= end)
             audio_times.append(word_times[mask] + (self.tmin - self.tshift - start)) # Audio times for each audio file, at the start of every segment
         return audio_times
     
@@ -112,7 +112,7 @@ class brainHandler:
             do_normalization (bool, optional): Do Robust Scalar Normalization. Defaults to True.
         """
         brain_segments = self.get_brain_segments(times, do_normalization)
-        np.savez(pth, brain_segments, mne_info = self.get_mne_info())
+        np.savez(pth, brain_segments = brain_segments, mne_info = self.get_mne_info())
         
 class audioHandler:
     def __init__(self, window_duration, target_len, tshift, device):
@@ -131,7 +131,7 @@ class audioHandler:
         if orig_srate != self.model_srate:
             wave = torchaudio.functional.resample(wave, orig_srate, self.model_srate)
         
-        input_vals = self.feature_extractor(wave, sampling_rate = self.model_srate, return_tensors = "pt", do_normalize = True)
+        input_vals = self.feature_extractor(wave, sampling_rate = self.model_srate, return_tensors = "pt", do_normalize = True).input_values
         with torch.no_grad():
             model_output = self.model(input_vals.to(self.device), output_hidden_states = True)
             hidden_states = model_output.get('hidden_states')
@@ -153,13 +153,14 @@ class audioHandler:
             if out is not None:
                 out = np.append(out, embedding_interp[None, :, :], axis = 0)
             else:
-                out = embedding_tmp[None, :, :]
+                out = embedding_interp[None, :, :]
+        assert len(out.shape) == 3, "Output Shape Mismatch"
         return out
     
     def get_all_embeddings(self, pths, times, tWindow, duration):
         out = None
         assert (len(pths) == len(times)) and (len(duration) == len(times)), "Length Mismatch in pths, times, duration"
-        for i in len(times):
+        for i in range(len(times)):
             time = times[i]
             pth = pths[i]
             wave, orig_srate = torchaudio.load(pth)
@@ -168,6 +169,8 @@ class audioHandler:
                 out = np.append(out, embeddings, axis = 0)
             else:
                 out = embeddings
+        # check if out has three dimensions
+        assert len(out.shape) == 3, "Output Shape Mismatch"
         return out
     
     def save_embeddings(self, save_pth, pths, times, tWindow, duration):
@@ -197,32 +200,39 @@ def DataFactory(brain_pth, audio_pth, save_pth, subject_no, tmin, tmax, tshift, 
     event_getter_obj = event_getter(tmin, tmax, tshift, events)
     word_times, audio_times = event_getter_obj.get_times()
     word_mask = event_getter_obj.get_word_mask()
+    print("Number of Words: " + str(sum(word_mask)))
     
     if word_mask_ref is not None:
-        assert word_mask == word_mask_ref, "Word Mask Mismatch"
+        assert (word_mask == word_mask_ref).all(), "Word Mask Mismatch"
     
     eeg_pth = brain_pth + get_file(brain_pth, '.fif')
     data = mne.io.read_raw_fif(eeg_pth, preload = True)
     bh = brainHandler(data, tmin, tmax, device)
+    print("Processing Brain Data...")
     bh.save_brain_segments(save_pth + 'brain/S'+ str(subject_no), word_times, do_normalization)
     
     if gen_audio:
+        print("Generating Audio Embeddings...")
         sound_durations = event_getter_obj.get_sound_duration()
         sound_pth = list([])
         for i in range(len(sound_durations)):
             sound_pth.append(audio_pth + str(i + 1) + '.wav')
         ah = audioHandler(tmax - tmin, bh.get_eeg_len(), tshift, device)
         ah.save_embeddings(save_pth + 'audio/S' + str(subject_no), sound_pth, audio_times, tmax - tmin, sound_durations)
+        print("Audio Embeddings Generated")
     
     if save_word_times:
         np.savez(save_pth + 'word_times', word_times = word_times)
+        print("Word Times Saved")
     
     return word_mask
 
 def main():
     # Parameters
-    brain_pth = '../../Data/brennan2019/'
-    audio_pth = '../../Data/Brennan/audio/DownTheRabbitHoleFinal_SoundFile'
+    # brain_pth = '../../Data/brennan2019/'
+    # audio_pth = '../../Data/Brennan/audio/DownTheRabbitHoleFinal_SoundFile'
+    brain_pth = '../cache/studies/brennan2019/'
+    audio_pth = '../data/brennan2019/download/audio/DownTheRabbitHoleFinal_SoundFile'
     tmin = -0.5
     tmax = 2.5
     time_shift = 0.15
@@ -238,6 +248,7 @@ def main():
     
     # Create Save Path
     if not os.path.exists(save_pth):
+        print("Creating Save Path")
         os.makedirs(save_pth)
         os.makedirs(save_pth + 'brain/')
         os.makedirs(save_pth + 'audio/')
@@ -245,8 +256,12 @@ def main():
     # Get Folders of Brain Data
     brain_dir = os.listdir(brain_pth)
     brain_dir = [d for d in brain_dir if os.path.isdir(brain_pth + d)]
+    print("Found " + str(len(brain_dir)) + " Subjects")
     
     word_mask_ref = None
     for i in range(len(brain_dir)):
+        print("Processing Subject " + str(i) + "...")
         word_mask_ref = DataFactory(brain_pth + brain_dir[i] + '/', audio_pth, save_pth, i, tmin, tmax, time_shift, device, gen_audio = (i == 0), do_normalization = True, word_mask_ref = word_mask_ref, save_word_times = (i == 0))
-    
+
+if __name__ == '__main__':
+    main()
